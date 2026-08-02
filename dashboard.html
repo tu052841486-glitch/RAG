@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>農藥知識 API 後台</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Noto Sans TC',sans-serif;font-size:14px;background:#f0f2f5}
+.wrap{display:flex;min-height:100vh}
+.sb{width:220px;background:#1a2332;position:fixed;top:0;left:0;height:100vh;display:flex;flex-direction:column}
+.sb-logo{padding:18px 16px;border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;gap:10px}
+.sb-icon{width:32px;height:32px;background:#2d6a4f;border-radius:8px;display:flex;align-items:center;justify-content:center}
+.sb-name{font-size:14px;font-weight:600;color:#fff}.sb-ver{font-size:11px;color:rgba(255,255,255,0.4)}
+.sb-nav{padding:12px 10px;flex:1}
+.sb-sec{font-size:10px;color:rgba(255,255,255,0.45);letter-spacing:0.8px;padding:10px 8px 5px;text-transform:uppercase}
+.sb-btn{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:6px;cursor:pointer;color:#d1d5db;font-size:13px;border:none;background:transparent;width:100%;text-align:left;font-family:inherit;transition:all 0.12s}
+.sb-btn:hover{background:rgba(255,255,255,0.07);color:#fff}.sb-btn.on{background:#2d6a4f;color:#fff;font-weight:500}
+.sb-btn i{font-size:16px;width:18px}
+.method{margin-left:auto;font-size:10px;padding:2px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-weight:500}
+.get{background:rgba(59,130,246,0.25);color:#93c5fd}.post{background:rgba(34,197,94,0.25);color:#86efac}
+.sb-foot{padding:12px 10px;border-top:1px solid rgba(255,255,255,0.08)}
+.online{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;background:rgba(255,255,255,0.04)}
+.dot{width:7px;height:7px;border-radius:50%;background:#22c55e;box-shadow:0 0 6px #22c55e}
+.online span{font-size:11px;color:rgba(255,255,255,0.45)}
+.main{margin-left:220px;flex:1}
+.topbar{background:#fff;border-bottom:1px solid #e5e7eb;height:54px;padding:0 28px;display:flex;align-items:center}
+.bc{font-size:12px;color:#9ca3af}.topbar-r{margin-left:auto;font-size:12px;padding:5px 12px;border-radius:6px;background:#f3f4f6;color:#374151;font-family:'JetBrains Mono',monospace}
+.content{padding:28px}.page{display:none}.page.on{display:block}
+.ph-title{font-size:20px;font-weight:600;color:#111827;margin-bottom:5px}.ph-sub{font-size:13px;color:#6b7280;margin-bottom:24px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}
+.sc{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:18px 20px;position:relative;overflow:hidden}
+.sc-bar{position:absolute;top:0;left:0;width:4px;height:100%}.sc-n{font-size:24px;font-weight:700;color:#111827;margin-bottom:3px}.sc-l{font-size:12px;color:#6b7280}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:18px}
+.card-h{padding:14px 20px;border-bottom:1px solid #f3f4f6;font-size:14px;font-weight:600;color:#111827}
+table{width:100%;border-collapse:collapse}
+th{padding:10px 20px;text-align:left;font-size:11px;font-weight:600;color:#6b7280;border-bottom:1px solid #f3f4f6;background:#fafafa;text-transform:uppercase}
+td{padding:12px 20px;font-size:13px;color:#374151;border-bottom:1px solid #f3f4f6}
+tr:last-child td{border-bottom:none}tr:hover td{background:#f9fafb}
+.b-get{background:#dbeafe;color:#1e40af;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;padding:3px 7px;border-radius:4px}
+.b-post{background:#dcfce7;color:#166534;font-family:'JetBrains Mono',monospace;font-size:10px;font-weight:700;padding:3px 7px;border-radius:4px}
+.b{display:inline-block;font-size:11px;padding:3px 8px;border-radius:4px;font-weight:500}
+.b-blue{background:#eff6ff;color:#1d4ed8}.b-green{background:#f0fdf4;color:#15803d}.b-amber{background:#fffbeb;color:#92400e}.b-pink{background:#fdf2f8;color:#86198f}
+.ep{background:#fff;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:14px}
+.ep-h{display:flex;align-items:center;gap:12px;padding:15px 20px}
+.ep-m{font-size:11px;font-weight:700;padding:4px 9px;border-radius:5px;font-family:'JetBrains Mono',monospace}
+.ep-m.g{background:#dbeafe;color:#1e40af}.ep-m.p{background:#dcfce7;color:#166534}
+.ep-path{font-size:13px;font-weight:600;color:#111827;font-family:'JetBrains Mono',monospace}
+.ep-body{padding:20px;border-top:1px solid #f3f4f6}
+.ptable{width:100%;border-collapse:collapse;margin-bottom:14px;font-size:12px}
+.ptable th{padding:8px 12px;background:#f9fafb;color:#6b7280;font-weight:600;border:1px solid #f3f4f6;font-size:11px;text-align:left}
+.ptable td{padding:9px 12px;border:1px solid #f3f4f6;color:#374151}
+.cn{font-family:'JetBrains Mono',monospace;color:#1d4ed8;font-size:11px;font-weight:500}
+.ct{font-family:'JetBrains Mono',monospace;color:#7c3aed;font-size:11px}.req{color:#dc2626;font-weight:600}
+.try{background:#f9fafb;border:1px solid #e5e7eb;border-radius:8px;padding:16px;margin-top:14px}
+.try-t{font-size:11px;font-weight:600;color:#6b7280;letter-spacing:0.5px;margin-bottom:12px;text-transform:uppercase}
+.try-row{display:flex;gap:10px;margin-bottom:10px;align-items:center}
+.try-l{font-size:12px;color:#374151;font-weight:500;min-width:75px}
+.try-in{flex:1;padding:7px 11px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;font-family:'Noto Sans TC',sans-serif;background:#fff;outline:none;color:#111827}
+.try-in:focus{border-color:#2d6a4f;box-shadow:0 0 0 3px rgba(45,106,79,0.1)}
+.try-btn{padding:8px 18px;background:#2d6a4f;border:none;border-radius:6px;color:#fff;font-size:13px;font-weight:500;cursor:pointer;font-family:inherit}
+.try-btn:hover{background:#1b4332}
+.res-st{display:none;align-items:center;font-size:12px;padding:4px 10px;border-radius:5px;margin:10px 0;font-weight:500}
+.ok{background:#f0fdf4;color:#15803d}.err{background:#fef2f2;color:#dc2626}
+.res{background:#0f172a;border-radius:6px;padding:14px;font-family:'JetBrains Mono',monospace;font-size:12px;color:#a3e635;white-space:pre-wrap;max-height:220px;overflow-y:auto;line-height:1.7;display:none}
+.res.show{display:block}
+.url-box{background:#0f172a;border-radius:8px;padding:13px 16px;font-family:'JetBrains Mono',monospace;font-size:14px;color:#a3e635;margin-bottom:10px}
+.info-t{width:100%;font-size:13px;border-collapse:collapse}
+.info-t td{padding:9px 0;border-bottom:1px solid #f3f4f6;color:#374151}
+.info-t tr:last-child td{border-bottom:none}
+.info-t .l{color:#6b7280;width:130px;font-size:12px}
+.info-t code{font-family:'JetBrains Mono',monospace;font-size:11px;background:#f3f4f6;padding:2px 6px;border-radius:4px;color:#1d4ed8}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="sb">
+  <div class="sb-logo">
+    <div class="sb-icon"><i class="ti ti-leaf" style="color:#a3e635;font-size:17px"></i></div>
+    <div><div class="sb-name">農藥知識 API</div><div class="sb-ver">v1.0.0 · RAG 系統</div></div>
+  </div>
+  <div class="sb-nav">
+    <div class="sb-sec">總覽</div>
+    <button class="sb-btn on" onclick="show('home',this)"><i class="ti ti-layout-dashboard"></i>首頁</button>
+    <div class="sb-sec">系統</div>
+    <button class="sb-btn" onclick="show('health',this)"><i class="ti ti-heart-rate-monitor"></i>健康檢查<span class="method get">GET</span></button>
+    <div class="sb-sec">農藥資料</div>
+    <button class="sb-btn" onclick="show('pest',this)"><i class="ti ti-leaf"></i>農藥列表<span class="method get">GET</span></button>
+    <button class="sb-btn" onclick="show('crops',this)"><i class="ti ti-plant-2"></i>作物清單<span class="method get">GET</span></button>
+    <button class="sb-btn" onclick="show('search',this)"><i class="ti ti-search"></i>關鍵字搜尋<span class="method get">GET</span></button>
+    <div class="sb-sec">RAG 問答</div>
+    <button class="sb-btn" onclick="show('ask',this)"><i class="ti ti-message-chatbot"></i>問答測試<span class="method post">POST</span></button>
+    <div class="sb-sec">新聞</div>
+    <button class="sb-btn" onclick="show('news',this)"><i class="ti ti-news"></i>今日新聞<span class="method get">GET</span></button>
+  </div>
+  <div class="sb-foot"><div class="online"><div class="dot"></div><span>localhost:8000 連線中</span></div></div>
+</div>
+<div class="main">
+  <div class="topbar"><span class="bc" id="bc">首頁</span><span class="topbar-r">http://localhost:8000</span></div>
+  <div class="content">
+
+    <div class="page on" id="p-home">
+      <div class="ph-title">農藥知識問答系統 API</div>
+      <div class="ph-sub">以 RAG 技術為核心，結合 SQLite 精確查詢與 ChromaDB 語意搜尋</div>
+      <div class="stats">
+        <div class="sc"><div class="sc-bar" style="background:#2d6a4f"></div><div class="sc-n">2,301</div><div class="sc-l">農藥登記筆數</div></div>
+        <div class="sc"><div class="sc-bar" style="background:#1d4ed8"></div><div class="sc-n">12</div><div class="sc-l">涵蓋作物種類</div></div>
+        <div class="sc"><div class="sc-bar" style="background:#7c3aed"></div><div class="sc-n">6</div><div class="sc-l">API 端點數量</div></div>
+        <div class="sc"><div class="sc-bar" style="background:#b45309"></div><div class="sc-n">1536</div><div class="sc-l">向量維度</div></div>
+      </div>
+      <div class="grid2">
+        <div class="card"><div class="card-h">系統資訊</div><div style="padding:16px 20px">
+          <table class="info-t">
+            <tr><td class="l">框架</td><td><code>FastAPI</code></td></tr>
+            <tr><td class="l">嵌入模型</td><td><code>text-embedding-3-small</code></td></tr>
+            <tr><td class="l">語言模型</td><td><code>gpt-4o-mini</code></td></tr>
+            <tr><td class="l">向量資料庫</td><td><code>ChromaDB</code></td></tr>
+            <tr><td class="l">結構化資料庫</td><td><code>SQLite</code></td></tr>
+          </table>
+        </div></div>
+        <div class="card"><div class="card-h">Base URL</div><div style="padding:16px 20px">
+          <div class="url-box">http://localhost:8000</div>
+          <table class="info-t">
+            <tr><td class="l">認證方式</td><td>無（本地開發）</td></tr>
+            <tr><td class="l">CORS</td><td>允許所有來源</td></tr>
+            <tr><td class="l">回應格式</td><td>application/json</td></tr>
+          </table>
+        </div></div>
+      </div>
+      <div class="card"><div class="card-h">端點一覽</div>
+        <table><thead><tr><th>方法</th><th>路徑</th><th>說明</th><th>分類</th></tr></thead>
+        <tbody>
+          <tr><td><span class="b-get">GET</span></td><td><code>/health</code></td><td>系統健康檢查</td><td><span class="b b-blue">系統</span></td></tr>
+          <tr><td><span class="b-get">GET</span></td><td><code>/api/pesticides</code></td><td>農藥列表查詢</td><td><span class="b b-green">農藥資料</span></td></tr>
+          <tr><td><span class="b-get">GET</span></td><td><code>/api/pesticides/crops</code></td><td>作物名稱清單</td><td><span class="b b-green">農藥資料</span></td></tr>
+          <tr><td><span class="b-get">GET</span></td><td><code>/api/pesticides/search</code></td><td>關鍵字搜尋</td><td><span class="b b-green">農藥資料</span></td></tr>
+          <tr><td><span class="b-post">POST</span></td><td><code>/api/ask</code></td><td>RAG 問答</td><td><span class="b b-amber">RAG 問答</span></td></tr>
+          <tr><td><span class="b-get">GET</span></td><td><code>/api/news</code></td><td>今日農藥新聞</td><td><span class="b b-pink">新聞</span></td></tr>
+        </tbody></table>
+      </div>
+    </div>
+
+    <div class="page" id="p-health">
+      <div class="ph-title">系統健康檢查</div><div class="ph-sub">確認後端服務是否正常運行</div>
+      <div class="ep"><div class="ep-h"><span class="ep-m g">GET</span><span class="ep-path">/health</span></div>
+        <div class="ep-body"><div class="try"><div class="try-t">立即測試</div>
+          <button class="try-btn" onclick="go('GET','http://localhost:8000/health',null,'h-r','h-s')">送出請求</button>
+          <div class="res-st" id="h-s"></div><div class="res" id="h-r"></div>
+        </div></div>
+      </div>
+    </div>
+
+    <div class="page" id="p-pest">
+      <div class="ph-title">農藥列表查詢</div><div class="ph-sub">從 SQLite 查詢農藥資料，支援多條件篩選</div>
+      <div class="ep"><div class="ep-h"><span class="ep-m g">GET</span><span class="ep-path">/api/pesticides</span></div>
+        <div class="ep-body">
+          <table class="ptable"><thead><tr><th>參數</th><th>類型</th><th>必填</th><th>說明</th></tr></thead>
+          <tbody>
+            <tr><td><span class="cn">crop</span></td><td><span class="ct">string</span></td><td>否</td><td>作物名稱，例：草莓</td></tr>
+            <tr><td><span class="cn">type</span></td><td><span class="ct">string</span></td><td>否</td><td>殺蟲／殺菌／除草／殺螨</td></tr>
+            <tr><td><span class="cn">name</span></td><td><span class="ct">string</span></td><td>否</td><td>農藥名稱（模糊搜尋）</td></tr>
+            <tr><td><span class="cn">limit</span></td><td><span class="ct">integer</span></td><td>否</td><td>筆數上限，預設 50</td></tr>
+          </tbody></table>
+          <div class="try"><div class="try-t">立即測試</div>
+            <div class="try-row"><span class="try-l">作物名稱</span><input class="try-in" id="p-c" placeholder="例：草莓"></div>
+            <div class="try-row"><span class="try-l">農藥類型</span><input class="try-in" id="p-t" placeholder="例：殺菌"></div>
+            <button class="try-btn" onclick="testP()">送出請求</button>
+            <div class="res-st" id="p-s"></div><div class="res" id="p-r"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page" id="p-crops">
+      <div class="ph-title">作物名稱清單</div><div class="ph-sub">回傳所有已收錄的作物名稱</div>
+      <div class="ep"><div class="ep-h"><span class="ep-m g">GET</span><span class="ep-path">/api/pesticides/crops</span></div>
+        <div class="ep-body"><div class="try"><div class="try-t">立即測試</div>
+          <button class="try-btn" onclick="go('GET','http://localhost:8000/api/pesticides/crops',null,'c-r','c-s')">送出請求</button>
+          <div class="res-st" id="c-s"></div><div class="res" id="c-r"></div>
+        </div></div>
+      </div>
+    </div>
+
+    <div class="page" id="p-search">
+      <div class="ph-title">農藥關鍵字搜尋</div><div class="ph-sub">同時搜尋農藥名稱、作物名稱、病蟲名稱</div>
+      <div class="ep"><div class="ep-h"><span class="ep-m g">GET</span><span class="ep-path">/api/pesticides/search</span></div>
+        <div class="ep-body">
+          <table class="ptable"><thead><tr><th>參數</th><th>類型</th><th>必填</th><th>說明</th></tr></thead>
+          <tbody><tr><td><span class="cn">q</span></td><td><span class="ct">string</span></td><td><span class="req">是</span></td><td>關鍵字，例：達馬松、炭疽病</td></tr></tbody></table>
+          <div class="try"><div class="try-t">立即測試</div>
+            <div class="try-row"><span class="try-l">關鍵字</span><input class="try-in" id="s-q" placeholder="例：達馬松"></div>
+            <button class="try-btn" onclick="testS()">送出請求</button>
+            <div class="res-st" id="s-s"></div><div class="res" id="s-r"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page" id="p-ask">
+      <div class="ph-title">農藥知識問答（RAG）</div><div class="ph-sub">SQLite 精確查詢 + ChromaDB 語意搜尋 + GPT-4o-mini 生成回覆</div>
+      <div class="ep"><div class="ep-h"><span class="ep-m p">POST</span><span class="ep-path">/api/ask</span></div>
+        <div class="ep-body">
+          <table class="ptable"><thead><tr><th>Request Body</th><th>類型</th><th>必填</th><th>說明</th></tr></thead>
+          <tbody><tr><td><span class="cn">question</span></td><td><span class="ct">string</span></td><td><span class="req">是</span></td><td>農民的自然語言問題</td></tr></tbody></table>
+          <div class="try"><div class="try-t">立即測試</div>
+            <div class="try-row"><span class="try-l">問題</span><input class="try-in" id="a-q" placeholder="例：草莓可以用哪些殺菌劑？"></div>
+            <button class="try-btn" onclick="testA()">送出請求</button>
+            <div class="res-st" id="a-s"></div><div class="res" id="a-r"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="page" id="p-news">
+      <div class="ph-title">今日農藥新聞</div><div class="ph-sub">每日自動搜尋，同一天只呼叫一次 API</div>
+      <div class="ep"><div class="ep-h"><span class="ep-m g">GET</span><span class="ep-path">/api/news</span></div>
+        <div class="ep-body"><div class="try"><div class="try-t">立即測試</div>
+          <button class="try-btn" onclick="go('GET','http://localhost:8000/api/news',null,'n-r','n-s')">送出請求</button>
+          <div class="res-st" id="n-s"></div><div class="res" id="n-r"></div>
+        </div></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+</div>
+<script>
+const bcs={home:'首頁',health:'健康檢查',pest:'農藥列表',crops:'作物清單',search:'關鍵字搜尋',ask:'問答測試',news:'今日新聞'};
+function show(id,btn){document.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));document.querySelectorAll('.sb-btn').forEach(b=>b.classList.remove('on'));document.getElementById('p-'+id).classList.add('on');btn.classList.add('on');document.getElementById('bc').textContent=bcs[id];}
+async function go(method,url,body,rId,sId){const r=document.getElementById(rId),s=document.getElementById(sId);r.textContent='載入中...';r.classList.add('show');s.style.display='none';try{const opt={method,headers:{'Content-Type':'application/json'}};if(body)opt.body=JSON.stringify(body);const res=await fetch(url,opt);const data=await res.json();s.style.display='inline-flex';s.className='res-st '+(res.ok?'ok':'err');s.textContent=res.ok?'✓ '+res.status+' 成功':'✗ '+res.status+' 錯誤';r.textContent=JSON.stringify(data,null,2);}catch(e){s.style.display='inline-flex';s.className='res-st err';s.textContent='✗ 連線失敗';r.textContent='請確認：uvicorn main:app --reload --port 8000';}}
+function testP(){const c=document.getElementById('p-c').value,t=document.getElementById('p-t').value;let url='http://localhost:8000/api/pesticides?limit=5';if(c)url+='&crop='+encodeURIComponent(c);if(t)url+='&type='+encodeURIComponent(t);go('GET',url,null,'p-r','p-s');}
+function testS(){go('GET','http://localhost:8000/api/pesticides/search?q='+encodeURIComponent(document.getElementById('s-q').value||'達馬松'),null,'s-r','s-s');}
+function testA(){go('POST','http://localhost:8000/api/ask',{question:document.getElementById('a-q').value||'草莓可以用哪些殺菌劑？'},'a-r','a-s');}
+</script>
+</body>
+</html>
