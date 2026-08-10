@@ -4,3 +4,11 @@ __pycache__/
 chroma_db/
 *.db
 .DS_Store
+
+data.tar
+__pycache__/
+*.pyc
+chroma_db/
+*.db
+*.csv
+*.pdf
