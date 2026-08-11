@@ -26,6 +26,7 @@ router = APIRouter()
 
 _news_cache: dict = {"date": None, "data": None}
 
+# ── 向量庫（各 collection 惰性載入並快取）─────────────────────
 _vectorstore = None
 _law_vectorstore = None
 _qa_vectorstore = None
@@ -85,6 +86,7 @@ def get_residue_vectorstore():
     return _residue_vectorstore
 
 
+# ── BM25 混合搜尋 ─────────────────────────────────────────────
 _bm25_cache = {}
 
 
@@ -219,11 +221,13 @@ def hybrid_retrieve(table_name: str, vectorstore, query: str, k: int = 5, vector
     return [SimpleDoc(pool[i][0], pool[i][1]) for i in final_ids[:k] if i in pool]
 
 
+# ── 請求模型 ──────────────────────────────────────────────────
 class AskRequest(BaseModel):
     question: str
-class AskRequest(BaseModel):
-    question: str
-    prev_crop: Optional[str] = None
+    prev_crop: Optional[str] = None  # 上一輪對話鎖定的作物，用於「還有哪些」這類接續問句
+    prev_pest: Optional[str] = None  # 上一輪對話鎖定的病蟲害，用於接續時延續同一病蟲害、數字一致
+    is_followup: Optional[bool] = False  # 是否為「還有哪些」這類接續追問（前端偵測後標記）
+
 
 class NewsItem(BaseModel):
     title: str; url: str; source: str; date: str; tag: str
@@ -271,7 +275,7 @@ CALC_KEYWORDS = ['計算', '換算', 'ppm', '倍數', '公升', '毫升', '公�
                  '稀釋', '調配', '需要多少', '幾桶', '桶數']
 
 
-def retrieve_for_question(q: str, prev_crop: str = None) -> dict:
+def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, is_followup: bool = False) -> dict:
     conn = get_db()
     crops = [r[0] for r in conn.execute("SELECT DISTINCT 作物名稱 FROM pesticides").fetchall()]
 
@@ -290,6 +294,7 @@ def retrieve_for_question(q: str, prev_crop: str = None) -> dict:
         中任一組成詞出現在問句裡，都算命中。解決資料庫作物名為複合格式時對不上的問題。"""
         if crop_name in text:
             return True
+        # 複合名稱拆解（空格、全形空格、頓號）
         for part in re.split(r'[\s\u3000、/]+', crop_name):
             if len(part) >= 2 and part in text:
                 return True
@@ -302,11 +307,20 @@ def retrieve_for_question(q: str, prev_crop: str = None) -> dict:
                 crop = next((c for c in crops if official in c or alias in c), None)
                 if crop:
                     break
-                # 接續對話：這一輪沒偵測到作物，但有「還有／其他／它」等接續詞，且上一輪有作物，就沿用上一輪的作物
+
+    # 接續對話：若這一輪問句「沒有」偵測到作物，但出現「還有／其他／它／那個」等接續詞，
+    # 且上一輪有鎖定作物（prev_crop），就沿用上一輪的作物，讓「還有哪些」能接續前一題。
+    # 反之，只要這一輪明確講了新的作物，就用新的（不硬帶舊的），避免換話題時帶錯。
     FOLLOWUP_WORDS = ['還有', '其他', '別的', '它', '牠', '那個', '這個', '再', '更多', '呢']
+    q_is_followup = is_followup or any(w in q for w in FOLLOWUP_WORDS)
     if not crop and prev_crop and prev_crop in crops:
-        if any(w in q for w in FOLLOWUP_WORDS):
+        if q_is_followup:
             crop = prev_crop
+    # 接續追問時，若這一輪問句沒帶新的病蟲害，就沿用上一輪的病蟲害，讓「還有哪些」延續同一病蟲害
+    # （例如「芒果炭疽病用藥」→「還有哪些」仍是查芒果炭疽病，數字一致、不會跳成整個作物）
+    followup_pest = None
+    if q_is_followup and prev_pest:
+        followup_pest = prev_pest
     ptype = next((t for t in ['殺菌','殺蟲','除草','殺螨'] if t in q), None)
     sql_ctx = ""
     sources = []
@@ -316,12 +330,20 @@ def retrieve_for_question(q: str, prev_crop: str = None) -> dict:
             sql_ctx = f"【{crop} {ptype}劑 精確查詢】\n" + "\n".join(f"• {r['農藥中文普通名稱']}：稀釋{r['稀釋倍數']}倍，{r['使用時期']}，採收期{r['安全採收期_天']}天" for r in rows)
             sources.append({"title": f"{crop}{ptype}劑登記資料", "url": "https://pesticide.aphia.gov.tw", "date": SOURCE_VERSIONS["pesticide"]})
 
+    # 若上面的「作物+類型」精確查詢沒撈到（例如問「芒果炭疽病用藥」這種帶病蟲害名、
+    # 但不含殺菌/殺蟲/除草/殺蟎字眼的查詢），改用「作物+病蟲害名稱」直接把該作物該病蟲害
+    # 的所有登記藥一次撈齊（避免只靠向量檢索被壓縮到剩兩三種）。
+    matched_pest = None
     if crop and not sql_ctx:
         pest_rows = conn.execute(
             "SELECT DISTINCT 病蟲害名稱 FROM pesticides WHERE 作物名稱=?", (crop,)
         ).fetchall()
+        # 找出問句提到的病蟲害名稱（取最長的匹配，避免「炭疽」比「炭疽病」先中而抓到較短的）
         matched_pests = [p[0] for p in pest_rows if p[0] and p[0] in q_normalized]
         matched_pest = max(matched_pests, key=len) if matched_pests else None
+        # 接續追問（「還有哪些」）時，若這輪沒帶新病蟲害，沿用上一輪的病蟲害，讓數字與範圍一致
+        if not matched_pest and followup_pest:
+            matched_pest = followup_pest
         if matched_pest:
             all_rows = conn.execute(
                 "SELECT DISTINCT 農藥中文普通名稱, 稀釋倍數, 使用時期, 安全採收期_天, 施藥間隔 "
@@ -329,15 +351,24 @@ def retrieve_for_question(q: str, prev_crop: str = None) -> dict:
                 "GROUP BY 農藥中文普通名稱", (crop, matched_pest)
             ).fetchall()
             total = len(all_rows)
-            shown = all_rows[:12]
+            # 一般首次詢問只列前 12 種；接續追問（還有哪些）時把全部餵給 AI，並提示接著講前面沒提到的，
+            # 這樣數字全程一致（都是 total 種）、AI 也盡量不重複。
+            if q_is_followup and followup_pest:
+                shown = all_rows
+                header = f"【{crop} {matched_pest} 登記用藥，資料庫共 {total} 種（使用者想看更多，請接著介紹前面對話還沒提到的品項，不要重複已經講過的）】"
+            else:
+                shown = all_rows[:12]
+                header = f"【{crop} {matched_pest} 登記用藥，資料庫共 {total} 種，以下列出主要 {len(shown)} 種】"
             if shown:
-                sql_ctx = f"【{crop} {matched_pest} 登記用藥，資料庫共 {total} 種，以下列出主要 {len(shown)} 種】\n" + \
+                sql_ctx = header + "\n" + \
                     "\n".join(f"• {r['農藥中文普通名稱']}：稀釋{r['稀釋倍數']}倍，{r['使用時期']}，採收期{r['安全採收期_天']}天" for r in shown)
                 if total > len(shown):
                     sql_ctx += f"\n（另有 {total - len(shown)} 種未列出，可再詢問完整清單）"
                 sources.append({"title": f"{crop}{matched_pest}登記用藥（共{total}種）", "url": "https://pesticide.aphia.gov.tw", "date": SOURCE_VERSIONS["pesticide"]})
-# 若問句只有作物、沒有對應到任何具體病蟲害（例如只問「木瓜」「木瓜類」），
+
+    # 若問句只有作物、沒有對應到任何具體病蟲害（例如只問「木瓜」「木瓜類」），
     # 就撈出該作物有登記的病蟲害清單，每種病蟲害列一個代表藥，形成「用藥目錄」。
+    # context 明確標示這些就是該作物的登記資料，讓 AI 不會誤判成「沒有專屬資料」。
     if crop and not sql_ctx:
         catalog_rows = conn.execute(
             "SELECT 病蟲害名稱, 農藥中文普通名稱, 稀釋倍數, 使用時期, 安全採收期_天 "
@@ -357,6 +388,7 @@ def retrieve_for_question(q: str, prev_crop: str = None) -> dict:
             example_pest = shown_cat[0]["病蟲害名稱"]
             sql_ctx += f"\n（提示：想看某個病蟲害的完整用藥清單，可再問「{crop}某病蟲害用藥」，例如「{crop}{example_pest}用藥」）"
             sources.append({"title": f"{crop}登記用藥總覽（可防治{pest_total}種病蟲害）", "url": "https://pesticide.aphia.gov.tw", "date": SOURCE_VERSIONS["pesticide"]})
+
     residue_sql_ctx = ""
     pesticide_names = [r[0] for r in conn.execute("SELECT DISTINCT 農藥中文普通名稱 FROM pesticides WHERE 農藥中文普通名稱 != ''").fetchall()]
     matched_pesticide = next((p for p in pesticide_names if p and len(p) >= 2 and p in q), None)
@@ -467,7 +499,9 @@ def retrieve_for_question(q: str, prev_crop: str = None) -> dict:
         alias, official = crop_alias_used
         context = f"（提醒：使用者問的「{alias}」，在本資料庫的正式登記名稱是「{official}」，兩者是同一種作物，下面的「{official}」資料就是「{alias}」的專屬資料，不是替代品或相近作物的資料。）\n\n" + context
 
-    return {"context": context, "sources": sources, "q_normalized": q_normalized, "is_calc_question": is_calc_question, "crop": crop}
+    return {"context": context, "sources": sources, "q_normalized": q_normalized, "is_calc_question": is_calc_question, "crop": crop, "pest": matched_pest}
+
+
 SYSTEM_PROMPT = r"""你是農藥安全顧問，請根據知識庫內容回答問題，用繁體中文。
 
 【最優先規則，絕對不可違反】回答只能是純文字，絕對不要使用任何 markdown 語法：不要用 **粗體**、不要用 ### 標題、不要用 - 或 * 開頭的項目符號、不要用 1. 2. 3. 這種編號清單搭配粗體標籤。條列內容一律用「・」開頭的純文字呈現，不加任何星號或井字號。
@@ -531,8 +565,9 @@ async def ask(req: AskRequest):
 
         q = req.question
         sub_questions = split_questions(q)
+        # 只有「單一問句」時才套用接續對話的作物沿用；多個子問題時各自獨立處理。
         if len(sub_questions) == 1:
-            results = [retrieve_for_question(sub_questions[0], prev_crop=req.prev_crop)]
+            results = [retrieve_for_question(sub_questions[0], prev_crop=req.prev_crop, prev_pest=req.prev_pest, is_followup=req.is_followup)]
         else:
             results = [retrieve_for_question(sq) for sq in sub_questions]
 
@@ -571,12 +606,15 @@ async def ask(req: AskRequest):
                     deduped_sources.append(s)
             sources = deduped_sources
 
+        # 把這一輪實際鎖定的作物回傳給前端，前端記住後，下一題若是「還有哪些」就能接續。
         current_crop = results[0].get("crop") if len(sub_questions) == 1 else None
-        return {"answer": answer, "sources": sources, "isRefusal": is_refusal, "crop": current_crop}
+        current_pest = results[0].get("pest") if len(sub_questions) == 1 else None
+        return {"answer": answer, "sources": sources, "isRefusal": is_refusal, "crop": current_crop, "pest": current_pest}
     except Exception as e:
         raise HTTPException(500, str(e))
 
 
+# ── 農藥資料查詢 ──────────────────────────────────────────────
 @router.get("/api/pesticides", tags=["農藥資料"], summary="查詢農藥列表")
 def get_pesticides(crop: Optional[str] = Query(None), type: Optional[str] = Query(None), name: Optional[str] = Query(None), limit: int = Query(50, le=200), username: str = Depends(get_current_user)):
     conn = get_db()
@@ -618,6 +656,7 @@ def search_law(q: str = Query(...), username: str = Depends(get_current_user)):
     return {"關鍵字": q, "結果": [dict(r) for r in rows], "筆數": len(rows)}
 
 
+# ── 模擬考 ────────────────────────────────────────────────────
 @router.get("/api/quiz/generate", tags=["模擬考"], summary="自動產生模擬考題目")
 def generate_quiz(category: str = Query("all"), count: int = Query(10), username: str = Depends(get_current_user)):
     import random
@@ -733,6 +772,7 @@ def generate_quiz(category: str = Query("all"), count: int = Query(10), username
     return {"題目": questions[:count]}
 
 
+# ── 今日新聞 ──────────────────────────────────────────────────
 @router.get("/api/news", tags=["新聞"], summary="今日農藥新聞", response_model=list[NewsItem])
 async def get_news(username: str = Depends(get_current_user)):
     today = str(date.today())
