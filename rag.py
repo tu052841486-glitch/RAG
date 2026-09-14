@@ -437,8 +437,9 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
     vs = get_vectorstore()
     if crop:
         docs = hybrid_retrieve("pesticides", vs, q_normalized, k=5, vector_filter={"作物名稱": crop})
-        if not docs:
-            docs = hybrid_retrieve("pesticides", vs, q_normalized, k=5)
+        # BM25 目前是全庫搜尋，混合排序後仍要再次套用作物白名單，
+        # 避免不同作物的資料被合併回來，或在查不到時退回全庫結果。
+        docs = [d for d in docs if d.metadata.get("作物名稱") == crop]
     else:
         docs = hybrid_retrieve("pesticides", vs, q_normalized, k=5)
 
