@@ -1,0 +1,15 @@
+:root {
+  --wakakusa: #8B9A1A;
+  --wakame:   #E8F0B0;
+  --wakairo:  #80C878;
+  --wakaha:   #A8C890;
+  --bg:       #F4F7E8;
+  --card:     #FFFFFF;
+  --text:     #2C3E1A;
+  --sub:      #6B7A52;
+  --border:   #D4E088;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: 'Noto Sans TC', sans-serif; background: var(--bg); color: var(--text); min-height: 100vh; }
+button { cursor: pointer; font-family: inherit; }
+a { text-decoration: none; color: inherit; }
