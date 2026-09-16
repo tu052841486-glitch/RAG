@@ -16,7 +16,7 @@ python build_index.py
 uvicorn main:app --reload --port 8000
 ``
 後台：http://localhost:8000/dashboard`
-
+前台：http://localhost:3000
 ### 前端
 ```bash
 cd pesticide-frontend
@@ -24,7 +24,7 @@ npm install
 npm start
 ```
 
-前台：http://localhost:3000
+
 
 前端:https://pesticide-doctor-frontend.vercel.app/
 
