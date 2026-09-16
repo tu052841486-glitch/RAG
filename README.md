@@ -14,10 +14,9 @@ python build_index.py
 
 # 啟動後端
 uvicorn main:app --reload --port 8000
-```
-https://pesticide-doctor-api.fly.dev/dashboard
+``後台：http://localhost:8000/dashboard`
 
-後台：http://localhost:8000/dashboard
+https://pesticide-doctor-api.fly.dev/dashboard
 
 ### 前端
 ```bash
