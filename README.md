@@ -14,7 +14,8 @@ python build_index.py
 
 # 啟動後端
 uvicorn main:app --reload --port 8000
-``後台：http://localhost:8000/dashboard`
+``
+後台：http://localhost:8000/dashboard`
 
 ### 前端
 ```bash
