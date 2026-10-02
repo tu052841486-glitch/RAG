@@ -228,6 +228,65 @@ class AskRequest(BaseModel):
     prev_crop: Optional[str] = None  # 上一輪對話鎖定的作物，用於「還有哪些」這類接續問句
     prev_pest: Optional[str] = None  # 上一輪對話鎖定的病蟲害，用於接續時延續同一病蟲害、數字一致
     is_followup: Optional[bool] = False  # 是否為「還有哪些」這類接續追問（前端偵測後標記）
+    history: Optional[list] = None  # 最近幾輪對話 [{role: "user"|"bot", text: "..."}]，用於連續問答
+
+
+# ── 連續問答：先判斷主題、把追問改寫成可獨立檢索的完整問題 ─────────────
+OFF_TOPIC_ANSWER = ("知識庫無此資訊。我是農藥博士，專門回答作物病蟲害用藥、安全採收期、"
+                    "農藥法規與中毒急救的問題，換個農業相關的問題試試看吧！")
+
+ROUTER_PROMPT = """你是農藥問答系統的前置判斷器。請根據「先前對話」理解使用者「最新的話」，回傳 JSON。
+
+type 只能是以下三種之一：
+- "on_topic"：與農業、作物、病蟲害、雜草、農藥、施藥、稀釋計算、農藥殘留、食品安全、農藥法規、農藥中毒急救有關。
+  換了一種作物或病蟲害（例如先問木瓜、再問「那芒果呢？」）仍然是 on_topic。
+- "chitchat"：打招呼、道謝、稱讚、問你是誰這類閒聊。
+- "off_topic"：與上述農業／農藥主題無關的問題（例如寫程式、數學作業、股票、旅遊、娛樂、一般常識）。
+
+question：若 type 是 on_topic，把最新的話改寫成「不需要看先前對話也能看懂」的完整問題，補上從先前對話推得出的作物、病蟲害、農藥名稱。
+  例如先前在談「木瓜炭疽病」，最新的話是「那芒果呢？」→「芒果炭疽病要用什麼藥？」；
+  先前在談「高麗菜小菜蛾用亞克瑞」，最新的話是「要噴幾次？」→「高麗菜小菜蛾用亞克瑞要噴幾次？」；
+  先前在談「高麗菜小菜蛾」，最新的話是「還有哪些？」→「高麗菜小菜蛾還有哪些登記用藥？」。
+  沿用使用者的作物俗名（說空心菜就寫空心菜），不要回答問題，只改寫。最新的話本身已經完整就原樣保留。
+reply：若 type 是 chitchat，用一兩句親切的繁體中文回應，並帶一句可以問什麼；其他情況留空字串。
+
+只回傳 JSON：{"type": "...", "question": "...", "reply": "..."}"""
+
+
+def _history_lines(history: list, limit: int = 8) -> list:
+    """整理前端傳來的對話紀錄：只取最近幾則、去掉空白、每則截斷，避免 token 暴增。"""
+    lines = []
+    for h in (history or [])[-limit:]:
+        if not isinstance(h, dict):
+            continue
+        text = str(h.get("text") or "").strip()
+        if not text:
+            continue
+        role = "user" if h.get("role") == "user" else "bot"
+        lines.append((role, text[:600]))
+    return lines
+
+
+def route_question(question: str, history: list) -> dict:
+    """主題判斷＋追問改寫。失敗時保守地當作 on_topic、原問題照用，不影響原本功能。"""
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import SystemMessage, HumanMessage
+
+    lines = _history_lines(history)
+    convo = "\n".join(f"{'使用者' if r == 'user' else '農藥博士'}：{t}" for r, t in lines) or "（無）"
+    try:
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY,
+                         model_kwargs={"response_format": {"type": "json_object"}})
+        resp = llm.invoke([
+            SystemMessage(content=ROUTER_PROMPT),
+            HumanMessage(content=f"先前對話：\n{convo}\n\n最新的話：{question}"),
+        ])
+        data = json.loads(resp.content)
+        rtype = data.get("type") if data.get("type") in ("on_topic", "chitchat", "off_topic") else "on_topic"
+        rewritten = (data.get("question") or "").strip() or question
+        return {"type": rtype, "question": rewritten, "reply": (data.get("reply") or "").strip()}
+    except Exception:
+        return {"type": "on_topic", "question": question, "reply": ""}
 
 
 class NewsItem(BaseModel):
@@ -600,17 +659,24 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
             "crop": crop, "pest": matched_pest, "cards": cards, "compliance": compliance}
 
 
-SYSTEM_PROMPT = r"""你是農藥安全顧問，請根據知識庫內容回答問題，用繁體中文。
+SYSTEM_PROMPT = r"""你是「農藥博士」，角色就像農會裡經驗豐富的植物保護指導員（植物醫師），正在田邊面對面回答農友的問題。農友要的不是一份清單，而是「我現在該怎麼做」。請根據知識庫內容，用繁體中文回答。
 
-【最優先規則，絕對不可違反】回答只能是純文字，絕對不要使用任何 markdown 語法：不要用 **粗體**、不要用 ### 標題、不要用 - 或 * 開頭的項目符號、不要用 1. 2. 3. 這種編號清單搭配粗體標籤。條列內容一律用「・」開頭的純文字呈現，不加任何星號或井字號。
+【最優先規則，絕對不可違反】回答只能是純文字，絕對不要使用任何 markdown 語法：不要用 **粗體**、不要用 ### 標題、不要用 - 或 * 開頭的項目符號、不要用 1. 2. 3. 這種編號清單搭配粗體標籤。需要條列時，一律用「・」開頭的純文字。
 
-用自然、親切、有溫度的口語化語氣回答，像是在跟來請教問題的農民朋友聊天解釋，而不是在唸公文或罐頭稿。每次回答的開頭、用詞、句子長短、段落安排都可以依問題內容彈性調整，不要每次都套用一模一樣的固定模板、開頭語或結尾語，避免死板生硬、千篇一律的感覺。回答時請沿用使用者提問時用的作物或農藥說法（例如使用者說「空心菜」就回答「空心菜」），不要擅自換成正式登記名稱（例如「蕹菜」），除非使用者自己就是用正式名稱發問。
+【回答的順序：像指導員一樣先講結論，再講做法】
+1. 第一句直接回答農友最想知道的事：能不能用、該用什麼、大概要怎麼處理。不要先鋪陳背景，也不要用「根據知識庫」「以下是」這類開頭。
+2. 接著給「現在可以怎麼做」：從知識庫裡挑 2～3 種最值得推薦的藥劑，用一句話說明為什麼推薦，例如安全採收期比較短、適合快要採收的時候用，或是作用方式不同、可以輪流使用避免抗藥性。每種藥只要帶出最關鍵的一兩個數字（通常是稀釋倍數和安全採收期）。
+3. 系統會在回答下方用「處方卡」完整列出每一種藥的稀釋倍數、用量、施藥間隔、注意事項，所以不要把所有藥劑和所有欄位逐一列完。若知識庫標明「資料庫共 N 種」，用一句話告訴農友總共有 N 種登記用藥，完整清單可以看下方處方卡，不要謊報總數。
+4. 補一句田間實務提醒，挑和這個問題最相關的就好，例如：不同成分輪流用比較不會產生抗藥性、避開中午高溫和下雨前噴藥、噴藥要穿戴防護、採收前一定要算好安全採收期。這類一般安全用藥觀念可以說，但絕對不可以自己編出知識庫沒有的稀釋倍數、用量、天數等數字。
+5. 如果農友的問題缺少關鍵資訊，在最後用一句話反問，幫他下一步問得更準。例如：沒說是什麼病蟲害就問「葉子上是看到蟲，還是斑點、白粉？」；推薦藥劑時若不知道離採收還有多久，就問「離採收大概還有幾天？我可以幫你挑安全採收期夠短的藥」。資訊已經足夠時就不用反問。
 
-若知識庫內容標明「資料庫共 N 種，以下列出主要 M 種」，請如實告知使用者這個作物病蟲害總共有 N 種登記用藥、以下介紹主要幾種，並在最後提醒還有其他幾種、可再詢問完整清單；不要自行把清單縮減成兩三種，也不要謊報總數。
+【連續對話】前面的對話只用來理解農友在問什麼、接續話題，不要重複上一輪已經講過的內容。藥劑和數字一律以這一輪提供的知識庫為準，前面對話裡的數字不能拿來當作新答案的依據。
 
-若問題是「某作物可用哪些農藥」這類查詢，用「・」條列每一種農藥，並用一般敘述句把稀釋倍數、使用時期、安全採收期等重點自然帶進去即可，例如：
-・速殺氟：防治蚜蟲類與粉蝨類，稀釋倍數約 14000 倍，害蟲發生時開始施藥，安全採收期 6 天。
-不要用粗體標籤、不要每個屬性都另起一行加「-」符號。
+【語氣】
+・像在跟農友聊天：句子短、口語、台灣農村常用的說法，例如「這款藥」「噴」「採收前幾天要停藥」，不要公文腔，也不要客服腔。
+・可以自然地稱呼對方「農友」或「你」，但不要每次都用一樣的開頭和結尾，也不要每次都說「隨時可以問我」。
+・一般回答控制在 4～8 句，簡單問題可以更短，不要長篇大論。
+・沿用農友提問時用的作物或農藥說法（農友說「空心菜」就回答「空心菜」），不要擅自換成正式登記名稱（例如「蕹菜」），除非農友自己就是用正式名稱發問。
 
 【名詞白話解釋】回答中若出現下列農業專有名詞，請在該名詞後面用括號補上簡短的白話解釋（例如「分蘗期（稻子長出分枝新莖的時期）」），讓不熟悉農業的使用者也看得懂。同一個名詞在同一則回答裡只需解釋一次，不用每次都補。若回答中沒出現這些詞就不用勉強加。對照表如下：
 ・分蘗期：稻子等禾本科作物長出分枝、新莖的時期
@@ -632,17 +698,13 @@ SYSTEM_PROMPT = r"""你是農藥安全顧問，請根據知識庫內容回答問
 ・輪替用藥：交替使用不同作用機制的農藥，避免病蟲害產生抗藥性
 ・套袋：用紙袋或塑膠袋把果實包起來，保護果實不受病蟲害或藥劑影響
 
-若問題是農藥合理使用的一般性觀念（如抗藥性、混用、施藥時機、法規等），用幾句自然的話說清楚即可，不需要套用清單格式。
+若問題是農藥合理使用的一般性觀念（如抗藥性、混用、施藥時機、法規等），先用一句話講結論，再用兩三句自然的話說清楚怎麼做，不需要套用清單格式。
 
-若題目包含多個子問題（標示為「1.」「2.」等），請針對每一個子問題分別、完整回答，不要只回答其中一題就結束；子問題之間可以用簡短的過渡語或適當分段呈現，不必每次都套用一模一樣的「【子問題1】」制式標題。
+若題目包含多個子問題（標示為「1.」「2.」等），請針對每一個子問題分別回答，不要只回答其中一題就結束；子問題之間用簡短的過渡語或分段即可，不必使用「【子問題1】」這類制式標題。
 
-只有在真的有實用的補充提醒、或有明確可註記的資料來源時，才視情況自然帶一句注意事項或來源說明，不需要每次都機械式地在結尾附上固定的兩行罐頭文字。
+【用藥合法性檢查】若知識庫開頭有「【用藥合法性檢查：未登記】」，第一句必須明確說「不可以」，並用一句話說明原因（這款藥沒有登記用在這個作物，用了可能違規，採收的作物也可能被驗出不合格），不得提供該藥用於該作物的任何用法；接著像指導員一樣，建議改用這個作物有登記的藥劑或洽詢當地農會、植物醫師，若知道農友想防治的病蟲害，可以直接點出替代藥劑。若是「【用藥合法性檢查：已登記】」，第一句先說可以用、有登記，再提醒稀釋倍數與安全採收期要照標示。
 
-【用藥合法性檢查】若知識庫開頭有「【用藥合法性檢查：未登記】」，回答第一句必須明確說「不可以」並說明此藥沒有登記用於該作物，不得提供該藥用於該作物的任何用法；若是「【用藥合法性檢查：已登記】」，第一句先說明可以使用、已登記，再說明用法與安全採收期。
-
-【處方卡】系統會在回答下方另外用「處方卡」完整顯示每一種藥劑的稀釋倍數、用量、安全採收期與注意事項，數字以處方卡為準。因此文字回答只需簡要介紹重點藥劑與使用觀念，不需要把每種藥的所有欄位逐一列完。
-
-規則：只用知識庫資料，不推測，繁體中文。若引用法規，需標明條號（如「依農藥管理法第29條」）。無資料則回「知識庫無此資訊，建議撥打 0800-022228」。若是多個子問題，且其中某些子問題有資料、某些沒有，請針對有資料的子問題正常回答，針對沒有資料的子問題單獨註明「該部分知識庫無此資訊」，不要因為其中一題沒資料就整體拒答。
+規則：藥劑名稱、稀釋倍數、用量、天數、法規條文只用知識庫資料，不推測；一般安全用藥觀念的提醒可以補充。繁體中文。若引用法規，需標明條號（如「依農藥管理法第29條」）。無資料則回「知識庫無此資訊，建議撥打 0800-022228」。若是多個子問題，且其中某些子問題有資料、某些沒有，請針對有資料的子問題正常回答，針對沒有資料的子問題單獨註明「該部分知識庫無此資訊」，不要因為其中一題沒資料就整體拒答。
 
 【重要：對照提醒優先於「找不到完全對應」的判斷】如果下方知識庫內容開頭出現「（提醒：使用者問的『XX』，在本資料庫的正式登記名稱是『YY』...）」這樣的對照說明，代表資料庫檢索系統已經確認這兩個是同一種作物、資料是完全對應的，請直接把後面列出的資料當成使用者所問作物的專屬資料正常回答，不要再說「沒有專屬資料」或「以下提供相近資料參考」這類保留語氣，就像資料庫裡本來就叫這個名字一樣直接回答即可。
 
@@ -685,11 +747,26 @@ async def ask(req: AskRequest):
         from langchain_openai import ChatOpenAI
         from langchain_core.messages import SystemMessage, HumanMessage
 
-        q = req.question
+        original_q = req.question.strip()
+        history = _history_lines(req.history)
+
+        # 1) 主題判斷＋追問改寫：無關問題直接回「查無資訊」，閒聊簡短回應，不進檢索
+        route = route_question(original_q, req.history)
+        if route["type"] == "off_topic":
+            return {"answer": OFF_TOPIC_ANSWER, "sources": [], "isRefusal": True,
+                    "crop": None, "pest": None, "cards": [], "compliance": []}
+        if route["type"] == "chitchat":
+            reply = route["reply"] or "不客氣！有任何作物病蟲害、用藥或安全採收期的問題，隨時問我。"
+            return {"answer": reply, "sources": [], "isRefusal": False,
+                    "crop": req.prev_crop, "pest": req.prev_pest, "cards": [], "compliance": []}
+
+        # 2) 用改寫後的完整問題去檢索（追問已補上作物／病蟲害，換作物也能正確切換）
+        q = route["question"] if history else original_q
         sub_questions = split_questions(q)
         # 只有「單一問句」時才套用接續對話的作物沿用；多個子問題時各自獨立處理。
         if len(sub_questions) == 1:
-            results = [retrieve_for_question(sub_questions[0], prev_crop=req.prev_crop, prev_pest=req.prev_pest, is_followup=req.is_followup)]
+            results = [retrieve_for_question(sub_questions[0], prev_crop=req.prev_crop, prev_pest=req.prev_pest,
+                                             is_followup=req.is_followup and not history)]
         else:
             results = [retrieve_for_question(sq) for sq in sub_questions]
 
@@ -710,11 +787,18 @@ async def ask(req: AskRequest):
             sources = [s for r in results for s in r["sources"]]
             is_calc_question = any(r["is_calc_question"] for r in results)
 
-        model_name = "gpt-4o" if is_calc_question else "gpt-4o-mini"
-        llm = ChatOpenAI(model=model_name, temperature=0, openai_api_key=OPENAI_API_KEY)
+        # 回答模型：預設 gpt-4o（口語自然度較佳）；想省成本可在 Fly secrets 設 ANSWER_MODEL=gpt-4o-mini
+        model_name = "gpt-4o" if is_calc_question else os.environ.get("ANSWER_MODEL", "gpt-4o")
+        # 計算題維持 temperature 0 確保穩定；一般問答稍微放寬，讓語氣不那麼制式（數字仍以處方卡為準）
+        llm = ChatOpenAI(model=model_name, temperature=0 if is_calc_question else 0.4, openai_api_key=OPENAI_API_KEY)
+        # 3) 把最近幾輪對話一起交給模型，回答才會接得上前文（數字仍只能來自這一輪的知識庫）
+        from langchain_core.messages import AIMessage
+        convo_msgs = [HumanMessage(content=t) if r == "user" else AIMessage(content=t) for r, t in history[-6:]]
+        asked = original_q if question_for_llm == original_q else f"{original_q}\n（完整意思：{question_for_llm}）"
         resp = llm.invoke([
             SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=f"知識庫：\n{context}\n\n問題：{question_for_llm}"),
+            *convo_msgs,
+            HumanMessage(content=f"知識庫：\n{context}\n\n問題：{asked}"),
         ])
         answer = resp.content
         REFUSAL_PHRASE = "知識庫無此資訊，建議撥打"
