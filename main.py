@@ -4,7 +4,8 @@
   db.py            資料庫連線與建表
   auth.py          帳號系統（註冊/登入/登出/驗證）
   conversations.py 對話紀錄 API
-  rag.py           檢索問答、農藥/法規查詢、模擬考、新聞
+  rag.py           檢索問答、農藥/法規查詢、用藥合法性檢查、處方卡、模擬考、新聞
+  vision.py        拍照問藥（作物病蟲害影像辨識）
 本檔只負責建立 app、設定 CORS、掛載各模組路由，以及啟動時初始化。
 """
 import os
@@ -18,14 +19,16 @@ from db import init_auth_tables, init_conversation_table
 import auth
 import conversations
 import rag
+import vision
 
-app = FastAPI(title="農藥知識問答系統 API", version="1.0.0")
+app = FastAPI(title="農藥博士 API", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # 掛載各模組路由
 app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(rag.router)
+app.include_router(vision.router)
 
 
 @app.get("/health", tags=["系統"], summary="系統健康檢查")

@@ -1,7 +1,8 @@
 """RAG 檢索問答、農藥/法規查詢、模擬考出題、今日新聞。
 
 這是系統的核心知識模組：BM25 + 向量語意的混合檢索、作物/農藥俗名對照、
-多子問題拆解、可溯源回覆、知識邊界保護，以及以既有知識庫自動出題的模擬考。
+多子問題拆解、可溯源回覆、知識邊界保護、用藥合法性檢查、結構化處方卡，
+以及以既有知識庫自動出題的模擬考。
 """
 import os
 import re
@@ -239,6 +240,80 @@ def split_questions(q: str) -> list:
     return parts if parts else [q]
 
 
+# ── 用藥處方卡：關鍵數值一律直接取自 SQLite 登記資料，不經 LLM 生成 ──────────
+CARD_COLUMNS = ("農藥中文普通名稱, 農藥含量, 劑型, 每公頃每次用量, 稀釋倍數, 使用時期, "
+                "施藥間隔, 施用次數, 安全採收期_天, 施用方法, 注意事項, 病蟲害名稱, 核准日期")
+
+
+def _clean(v):
+    v = (str(v) if v is not None else "").strip()
+    return "" if v in ("-", "－", "nan", "None") else v
+
+
+def _format_approved(v):
+    """核准日期為民國年 7 碼（如 0840426），轉成「民國84年04月26日」方便閱讀。"""
+    v = _clean(v)
+    if len(v) == 7 and v.isdigit():
+        return f"民國{int(v[:3])}年{v[3:5]}月{v[5:]}日"
+    return v
+
+
+def row_to_card(r, crop: str) -> dict:
+    d = dict(r)
+    return {
+        "name": _clean(d.get("農藥中文普通名稱")),
+        "crop": crop,
+        "pest": _clean(d.get("病蟲害名稱")),
+        "content": _clean(d.get("農藥含量")),
+        "formulation": _clean(d.get("劑型")),
+        "dosage": _clean(d.get("每公頃每次用量")),
+        "dilution": _clean(d.get("稀釋倍數")),
+        "timing": _clean(d.get("使用時期")),
+        "interval": _clean(d.get("施藥間隔")),
+        "times": _clean(d.get("施用次數")),
+        "phi": _clean(d.get("安全採收期_天")),
+        "method": _clean(d.get("施用方法")),
+        "notes": _clean(d.get("注意事項")),
+        "approved": _format_approved(d.get("核准日期")),
+    }
+
+
+def _match_pesticide(text: str, pesticide_names: list):
+    """問句中出現的農藥名稱，取最長的匹配（避免「加保扶」被「丁基加保扶」以外的短名先吃掉）。"""
+    hits = [p for p in pesticide_names if p and len(p) >= 2 and p in text]
+    return max(hits, key=len) if hits else None
+
+
+def check_compliance(conn, crop: str, pesticide: str, alias_used=None) -> dict:
+    """用藥合法性檢查：該農藥是否登記用於該作物。"""
+    rows = conn.execute(
+        "SELECT DISTINCT 病蟲害名稱 FROM pesticides WHERE 作物名稱=? AND 農藥中文普通名稱=? AND 病蟲害名稱 != ''",
+        (crop, pesticide),
+    ).fetchall()
+    crop_display = alias_used[0] if alias_used else crop.split()[0]
+    if rows:
+        return {
+            "status": "registered", "crop": crop, "crop_display": crop_display,
+            "pesticide": pesticide, "pests": [r[0] for r in rows][:12],
+        }
+    others = conn.execute(
+        "SELECT DISTINCT 作物名稱 FROM pesticides WHERE 農藥中文普通名稱=? LIMIT 8", (pesticide,)
+    ).fetchall()
+    return {
+        "status": "not_registered", "crop": crop, "crop_display": crop_display,
+        "pesticide": pesticide, "other_crops": [r[0].split()[0] for r in others],
+    }
+
+
+def compliance_context(c: dict) -> str:
+    if c["status"] == "registered":
+        return (f"【用藥合法性檢查：已登記】「{c['pesticide']}」已登記用於「{c['crop_display']}」，"
+                f"登記防治對象：{'、'.join(c['pests'])}。請依登記用法使用，並遵守安全採收期。")
+    return (f"【用藥合法性檢查：未登記】資料庫查無「{c['pesticide']}」登記用於「{c['crop_display']}」的紀錄。"
+            f"農藥必須依登記的作物與病蟲害使用，請在回答第一句就明確告訴使用者「不可以」將此藥用於{c['crop_display']}，"
+            f"並建議改用{c['crop_display']}已登記的藥劑，或洽詢當地農會、植物醫師。")
+
+
 CROP_ALIASES = {
     "空心菜": "蕹菜", "地瓜葉": "甘藷", "地瓜": "甘藷", "番薯": "甘藷",
     "高麗菜": "甘藍", "大陸妹": "結球萵苣", "娃娃菜": "結球白菜", "白菜": "小白菜",
@@ -321,12 +396,26 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
     followup_pest = None
     if q_is_followup and prev_pest:
         followup_pest = prev_pest
-    ptype = next((t for t in ['殺菌','殺蟲','除草','殺螨'] if t in q), None)
+    # 藥劑類型：資料庫沒有「藥劑類型」欄位，改由登記的防治對象推斷
+    #   殺菌劑 → 病害（名稱含「病」）；殺蟎劑 → 蟎類；除草劑 → 雜草；殺蟲劑 → 其餘蟲害
+    ptype = next((t for t in ['殺菌', '殺蟲', '除草', '殺蟎', '殺螨'] if t in q), None)
+    if ptype == '殺螨':
+        ptype = '殺蟎'
+    PTYPE_SQL = {
+        '殺菌': "病蟲害名稱 LIKE '%病%'",
+        '殺蟎': "(病蟲害名稱 LIKE '%蟎%' OR 病蟲害名稱 LIKE '%螨%')",
+        '除草': "(病蟲害名稱 LIKE '%草%' OR 病蟲害名稱 LIKE '%雜草%')",
+        '殺蟲': ("病蟲害名稱 NOT LIKE '%病%' AND 病蟲害名稱 NOT LIKE '%蟎%' AND 病蟲害名稱 NOT LIKE '%螨%' "
+                 "AND 病蟲害名稱 NOT LIKE '%草%' AND 病蟲害名稱 NOT LIKE '%調節%' AND 病蟲害名稱 NOT LIKE '%促進%' "
+                 "AND 病蟲害名稱 != ''"),
+    }
     sql_ctx = ""
     sources = []
+    cards = []
     if crop and ptype:
-        rows = conn.execute("SELECT 農藥中文普通名稱,稀釋倍數,使用時期,安全採收期_天,施藥間隔 FROM pesticides WHERE 作物名稱=? AND 病蟲害名稱 LIKE ? GROUP BY 農藥中文普通名稱 LIMIT 15", (crop, f"%{ptype}%")).fetchall()
+        rows = conn.execute(f"SELECT {CARD_COLUMNS} FROM pesticides WHERE 作物名稱=? AND {PTYPE_SQL[ptype]} GROUP BY 農藥中文普通名稱 LIMIT 15", (crop,)).fetchall()
         if rows:
+            cards = [row_to_card(r, crop) for r in rows]
             sql_ctx = f"【{crop} {ptype}劑 精確查詢】\n" + "\n".join(f"• {r['農藥中文普通名稱']}：稀釋{r['稀釋倍數']}倍，{r['使用時期']}，採收期{r['安全採收期_天']}天" for r in rows)
             sources.append({"title": f"{crop}{ptype}劑登記資料", "url": "https://pesticide.aphia.gov.tw", "date": SOURCE_VERSIONS["pesticide"]})
 
@@ -346,7 +435,7 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
             matched_pest = followup_pest
         if matched_pest:
             all_rows = conn.execute(
-                "SELECT DISTINCT 農藥中文普通名稱, 稀釋倍數, 使用時期, 安全採收期_天, 施藥間隔 "
+                f"SELECT {CARD_COLUMNS} "
                 "FROM pesticides WHERE 作物名稱=? AND 病蟲害名稱=? "
                 "GROUP BY 農藥中文普通名稱", (crop, matched_pest)
             ).fetchall()
@@ -359,6 +448,7 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
             else:
                 shown = all_rows[:12]
                 header = f"【{crop} {matched_pest} 登記用藥，資料庫共 {total} 種，以下列出主要 {len(shown)} 種】"
+            cards = [row_to_card(r, crop) for r in shown]
             if shown:
                 sql_ctx = header + "\n" + \
                     "\n".join(f"• {r['農藥中文普通名稱']}：稀釋{r['稀釋倍數']}倍，{r['使用時期']}，採收期{r['安全採收期_天']}天" for r in shown)
@@ -391,7 +481,10 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
 
     residue_sql_ctx = ""
     pesticide_names = [r[0] for r in conn.execute("SELECT DISTINCT 農藥中文普通名稱 FROM pesticides WHERE 農藥中文普通名稱 != ''").fetchall()]
-    matched_pesticide = next((p for p in pesticide_names if p and len(p) >= 2 and p in q), None)
+    matched_pesticide = _match_pesticide(q_normalized, pesticide_names)
+    compliance = None
+    if crop and matched_pesticide:
+        compliance = check_compliance(conn, crop, matched_pesticide, crop_alias_used)
     if matched_pesticide:
         try:
             residue_rows = conn.execute(
@@ -496,11 +589,15 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
         residue_url = d.metadata.get("來源") or "https://consumer.fda.gov.tw"
         sources.append({"title": t, "url": residue_url, "date": SOURCE_VERSIONS["residue"]})
 
+    if compliance:
+        context = compliance_context(compliance) + "\n\n" + context
+
     if crop_alias_used:
         alias, official = crop_alias_used
         context = f"（提醒：使用者問的「{alias}」，在本資料庫的正式登記名稱是「{official}」，兩者是同一種作物，下面的「{official}」資料就是「{alias}」的專屬資料，不是替代品或相近作物的資料。）\n\n" + context
 
-    return {"context": context, "sources": sources, "q_normalized": q_normalized, "is_calc_question": is_calc_question, "crop": crop, "pest": matched_pest}
+    return {"context": context, "sources": sources, "q_normalized": q_normalized, "is_calc_question": is_calc_question,
+            "crop": crop, "pest": matched_pest, "cards": cards, "compliance": compliance}
 
 
 SYSTEM_PROMPT = r"""你是農藥安全顧問，請根據知識庫內容回答問題，用繁體中文。
@@ -540,6 +637,10 @@ SYSTEM_PROMPT = r"""你是農藥安全顧問，請根據知識庫內容回答問
 若題目包含多個子問題（標示為「1.」「2.」等），請針對每一個子問題分別、完整回答，不要只回答其中一題就結束；子問題之間可以用簡短的過渡語或適當分段呈現，不必每次都套用一模一樣的「【子問題1】」制式標題。
 
 只有在真的有實用的補充提醒、或有明確可註記的資料來源時，才視情況自然帶一句注意事項或來源說明，不需要每次都機械式地在結尾附上固定的兩行罐頭文字。
+
+【用藥合法性檢查】若知識庫開頭有「【用藥合法性檢查：未登記】」，回答第一句必須明確說「不可以」並說明此藥沒有登記用於該作物，不得提供該藥用於該作物的任何用法；若是「【用藥合法性檢查：已登記】」，第一句先說明可以使用、已登記，再說明用法與安全採收期。
+
+【處方卡】系統會在回答下方另外用「處方卡」完整顯示每一種藥劑的稀釋倍數、用量、安全採收期與注意事項，數字以處方卡為準。因此文字回答只需簡要介紹重點藥劑與使用觀念，不需要把每種藥的所有欄位逐一列完。
 
 規則：只用知識庫資料，不推測，繁體中文。若引用法規，需標明條號（如「依農藥管理法第29條」）。無資料則回「知識庫無此資訊，建議撥打 0800-022228」。若是多個子問題，且其中某些子問題有資料、某些沒有，請針對有資料的子問題正常回答，針對沒有資料的子問題單獨註明「該部分知識庫無此資訊」，不要因為其中一題沒資料就整體拒答。
 
@@ -592,6 +693,9 @@ async def ask(req: AskRequest):
         else:
             results = [retrieve_for_question(sq) for sq in sub_questions]
 
+        cards = [c for r in results for c in (r.get("cards") or [])][:24]
+        compliance = [r["compliance"] for r in results if r.get("compliance")]
+
         if len(sub_questions) == 1:
             context = results[0]["context"]
             question_for_llm = sub_questions[0]
@@ -618,6 +722,8 @@ async def ask(req: AskRequest):
 
         if is_refusal:
             sources = []
+            cards = []
+            compliance = []
         else:
             seen = set()
             deduped_sources = []
@@ -630,7 +736,8 @@ async def ask(req: AskRequest):
         # 把這一輪實際鎖定的作物回傳給前端，前端記住後，下一題若是「還有哪些」就能接續。
         current_crop = results[0].get("crop") if len(sub_questions) == 1 else None
         current_pest = results[0].get("pest") if len(sub_questions) == 1 else None
-        return {"answer": answer, "sources": sources, "isRefusal": is_refusal, "crop": current_crop, "pest": current_pest}
+        return {"answer": answer, "sources": sources, "isRefusal": is_refusal, "crop": current_crop, "pest": current_pest,
+                "cards": cards, "compliance": compliance}
     except Exception as e:
         raise HTTPException(500, str(e))
 

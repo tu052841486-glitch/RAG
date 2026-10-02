@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import {
   askQuestion,
+  identifyImage,
   listConversations,
   upsertConversation,
   deleteConversationApi,
@@ -11,7 +12,7 @@ import { useAuth } from './AuthContext';
 
 const WELCOME = {
   role: 'bot',
-  text: '你好！我是農藥博士 🌿\n\n你可以問我：\n• 某作物可以用哪些農藥？\n• 某農藥的安全採收期是幾天？\n• 某病蟲害用哪種農藥防治？',
+  text: '你好！我是農藥博士 🌿\n\n你可以問我：\n• 某作物可以用哪些農藥？\n• 某農藥能不能用在某作物上？\n• 某農藥的安全採收期是幾天？\n\n不知道作物得了什麼病？按輸入框旁的 📷 拍一張照片給我看。',
   sources: [],
 };
 
@@ -188,13 +189,16 @@ export function ChatProvider({ children }) {
       const FOLLOWUP_WORDS = ['還有', '其他', '別的', '它', '牠', '那個', '這個', '再', '更多', '呢'];
       const isFollowup = FOLLOWUP_WORDS.some(w => qtext.includes(w));
       const res = await askQuestion(qtext, lastCropRef.current, lastPestRef.current, isFollowup);
-      const { answer, sources, isRefusal, crop, pest } = res.data;
+      const { answer, sources, isRefusal, crop, pest, cards, compliance } = res.data;
       if (crop) lastCropRef.current = crop;
       if (pest) lastPestRef.current = pest;
       else if (!isFollowup) lastPestRef.current = null;
       const finalConv = baseConv ? {
         ...baseConv,
-        messages: [...baseConv.messages, { role: 'bot', text: answer, sources: sources || [], isRefusal }],
+        messages: [...baseConv.messages, {
+          role: 'bot', text: answer, sources: sources || [], isRefusal,
+          cards: cards || [], compliance: compliance || [],
+        }],
         updatedAt: Date.now(),
       } : null;
 
@@ -214,10 +218,48 @@ export function ChatProvider({ children }) {
     }
   };
 
+  // 拍照問藥：image 為送去辨識的壓縮圖，thumb 為存進對話紀錄的小縮圖（避免對話資料過大）
+  const sendImage = async (convId, image, thumb) => {
+    let baseConv = null;
+    setConversations(list => list.map(c => {
+      if (c.id !== convId) return c;
+      const updated = {
+        ...c,
+        title: !c.messages.some(m => m.role === 'user') ? '📷 拍照問藥' : c.title,
+        messages: [...c.messages, { role: 'user', text: '幫我看看這是什麼病蟲害', image: thumb }],
+        updatedAt: Date.now(),
+      };
+      baseConv = updated;
+      return updated;
+    }));
+
+    setPendingIds(p => [...p, convId]);
+    let botMsg;
+    try {
+      const res = await identifyImage(image);
+      botMsg = { role: 'bot', kind: 'identify', text: '', identify: res.data, sources: [] };
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      botMsg = {
+        role: 'bot',
+        text: typeof detail === 'string' ? detail : '照片辨識失敗，請確認網路連線後再試一次。',
+        sources: [], isRefusal: true,
+      };
+    }
+    const finalConv = baseConv ? {
+      ...baseConv,
+      messages: [...baseConv.messages, botMsg],
+      updatedAt: Date.now(),
+    } : null;
+    if (finalConv) await persist(finalConv);
+    setConversations(list => list.map(c => c.id === convId && finalConv ? finalConv : c));
+    setPendingIds(p => p.filter(id => id !== convId));
+  };
+
   return (
     <ChatContext.Provider value={{
       conversations, activeId, setActiveId, pendingIds, loadingList,
-      newConversation, enterRAG, deleteConversation, renameConversation, togglePin, send,
+      newConversation, enterRAG, deleteConversation, renameConversation, togglePin, send, sendImage,
       isGuest: !token,
     }}>
       {children}

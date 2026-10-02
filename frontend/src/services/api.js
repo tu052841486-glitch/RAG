@@ -32,6 +32,7 @@ export const getPesticides = (params) => API.get('/api/pesticides', { params });
 export const getCrops = () => API.get('/api/pesticides/crops');
 export const searchPesticides = (q) => API.get('/api/pesticides/search', { params: { q } });
 export const askQuestion = (question, prevCrop, prevPest, isFollowup) => API.post('/api/ask', { question, prev_crop: prevCrop || null, prev_pest: prevPest || null, is_followup: !!isFollowup });
+export const identifyImage = (image) => API.post('/api/identify', { image }, { timeout: 60000 });
 export const getNews = () => API.get('/api/news');
 export const generateQuiz = (category, count) => API.get('/api/quiz/generate', { params: { category, count } });
 
