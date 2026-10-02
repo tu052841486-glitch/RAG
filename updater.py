@@ -8,6 +8,7 @@
   5. 自動排程：後端啟動後於背景執行，每週日凌晨 3 點（台灣時間）自動更新；也可由管理端點手動觸發。
 """
 import os
+import re
 import time
 import threading
 import traceback
@@ -115,12 +116,20 @@ def _chunk_text(d: dict) -> str:
 
 def _scrape_pesticides() -> pd.DataFrame:
     import pesticide_final as pf
-    items = pf.get_farm_checkbox_list()
-    if not items:
+    leaves = pf.get_leaf_farms_any()
+    if not leaves:
         raise RuntimeError("無法取得作物清單，官方網站可能暫時無法連線或已改版")
-    tree = pd.DataFrame(items, columns=["代碼", "名稱"])
-    tree["碼數"] = tree["代碼"].str.len()
-    leaves = pf.get_leaf_farms(tree)
+    # 沿用資料庫既有的作物名稱（例如「檬果 芒果」「甘藍 高麗菜」這種含俗名的複合名稱），
+    # 讓俗名查詢與既有資料保持一致；官網新增的作物才使用新名稱。
+    conn = get_db()
+    try:
+        known = dict(conn.execute("SELECT DISTINCT 作物代碼, 作物名稱 FROM pesticides").fetchall())
+    except Exception:
+        known = {}
+    conn.close()
+    for leaf in leaves:
+        if leaf["代碼"] in known:
+            leaf["名稱"] = known[leaf["代碼"]]
     rows = pf.crawl_all(leaves)
     if not rows:
         raise RuntimeError("沒有爬到任何登記資料")
@@ -251,8 +260,10 @@ def update_regulations(scraper=None, rebuild_index=None) -> dict:
             _log_finish(log_id, "aborted", total=len(old), message=msg)
             return {"status": "aborted", "message": msg}
 
-        old_set = {(r[0], r[1], r[2]) for r in old}
-        new_set = {(r["法規名稱"], r["條號"], r["條文內容"]) for _, r in new_df.iterrows()}
+        # 比對時忽略空白差異（網頁排版變動不算條文修正）
+        norm = lambda x: re.sub(r"\s+", "", str(x or ""))
+        old_set = {(r[0], norm(r[1]), norm(r[2])) for r in old}
+        new_set = {(r["法規名稱"], norm(r["條號"]), norm(r["條文內容"])) for _, r in new_df.iterrows()}
         if old_set == new_set:
             conn.close()
             _log_finish(log_id, "no_change", total=len(old), message="法規條文無異動")

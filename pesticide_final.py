@@ -1,5 +1,14 @@
 # -*- coding: utf-8 -*-
+"""農藥資訊服務網「病蟲害防治」用藥資料爬蟲。
+
+2026/10 官網改版後的結構：
+  - 作物清單改為內嵌在頁面中的 JSON（<script id="farmListData">），以 IsLeaf 標記末層作物
+  - 用藥表格網址由 Query/BugFarmUserange 改為 Query/BugUserange?flag=0&farm=作物代碼
+  - 表格欄位不變（另新增「作用機制」欄，如 IRAC: 1A）
+舊版的 checkbox 解析保留為備援。
+"""
 import re
+import json
 import time
 import requests
 import urllib3
@@ -10,7 +19,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE_URL  = "https://pesticide.aphia.gov.tw/information"
 BUG_PAGE  = f"{BASE_URL}/Query/Bug"
-QUERY_URL = f"{BASE_URL}/Query/BugFarmUserange/"
+QUERY_URL = f"{BASE_URL}/Query/BugUserange"
 DELAY = 1.0
 
 HEADERS = {
@@ -63,6 +72,37 @@ def get_farm_checkbox_list():
                 label_text = parent.get_text(strip=True)
         items.append((code, label_text))
     return items
+
+
+def get_leaf_farms_from_json():
+    """新版官網：從頁面內嵌的 farmListData JSON 取出所有末層作物。回傳 [{"代碼":..., "名稱":...}]"""
+    print("Step 1: fetching farm list (JSON)...")
+    r = SESSION.get(BUG_PAGE, timeout=30)
+    r.encoding = "utf-8"
+    print(f"  status={r.status_code}, size={len(r.text)}")
+    if r.status_code != 200:
+        return []
+    soup = BeautifulSoup(r.text, "html.parser")
+    tag = soup.find("script", id="farmListData")
+    if not tag or not tag.string:
+        print("  farmListData not found")
+        return []
+    tree = json.loads(tag.string)
+    leaves, seen = [], set()
+
+    def walk(nodes):
+        for n in nodes or []:
+            children = n.get("Children") or []
+            if n.get("IsLeaf") or not children:
+                code = (n.get("Farmid") or "").strip()
+                if code and code not in seen:
+                    seen.add(code)
+                    leaves.append({"代碼": code, "名稱": (n.get("DisplayName") or "").strip()})
+            walk(children)
+
+    walk(tree)
+    print(f"  leaf crops: {len(leaves)}")
+    return leaves
 
 
 def save_tree_csv(items):
@@ -128,7 +168,7 @@ def crawl_all(leaf_farms):
     for i, item in enumerate(leaf_farms, 1):
         code = item["代碼"]
         name = item["名稱"] or code
-        params = {"flag": "", "farm": code, "bug": ""}
+        params = {"flag": "0", "farm": code}
         try:
             r = SESSION.get(QUERY_URL, params=params, timeout=20)
             r.encoding = "utf-8"
@@ -144,13 +184,19 @@ def crawl_all(leaf_farms):
     return all_rows
 
 
-def main():
+def get_leaf_farms_any():
+    """優先使用新版 JSON 作物清單；失敗時退回舊版 checkbox 解析。"""
+    leaves = get_leaf_farms_from_json()
+    if leaves:
+        return leaves
     items = get_farm_checkbox_list()
     if not items:
-        print("no farm items found")
-        return
-    df = save_tree_csv(items)
-    leaf_farms = get_leaf_farms(df)
+        return []
+    return get_leaf_farms(save_tree_csv(items))
+
+
+def main():
+    leaf_farms = get_leaf_farms_any()
     if not leaf_farms:
         print("no leaf farms found")
         return

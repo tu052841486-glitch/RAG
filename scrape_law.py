@@ -7,6 +7,7 @@ scrape_law.py — 爬取農藥相關法規全文，依條文切分
 輸出：law_articles.csv（法規名稱、章節、條號、條文內容、來源網址、版本日期）
 """
 import re
+import html
 import requests
 import urllib3
 import pandas as pd
@@ -46,10 +47,12 @@ def scrape_one_law(law_name: str, url: str):
         print(f"  ❌ 狀態碼 {r.status_code}")
         return []
 
-    soup = BeautifulSoup(r.text, "html.parser")
+    # 2026/10 官網改版：條文內容以「HTML 跳脫字元」嵌在頁面中（&lt;p&gt;第　一　條…），
+    # 需先還原（unescape）再解析；舊版頁面還原後內容不變，兩者皆相容。
+    soup = BeautifulSoup(html.unescape(r.text), "html.parser")
     full_text = soup.get_text(separator="\n")
 
-    date_match = re.search(r"最後更新時間\s*\n?\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", full_text)
+    date_match = re.search(r"最後更新時間[^0-9]{0,20}([0-9]{4}-[0-9]{2}-[0-9]{2})", full_text)
     version_date = date_match.group(1) if date_match else "未知"
 
     # 只匹配「行首」的第 X 條（每條之間用 <br> 分隔，取代成換行），
@@ -82,6 +85,12 @@ def scrape_one_law(law_name: str, url: str):
         start = m.end()
         end = matches[i + 1].start() if i + 1 < len(matches) else len(full_text)
         content = full_text[start:end].strip()
+        # 最後一條之後常接著頁尾（更新時間、附件、版權宣告…），遇到頁尾關鍵字就截斷
+        for marker in ("最後更新時間", "回上一頁", "相關附件", "附件下載", "瀏覽人次", "上一筆", "下一筆",
+                       "版權所有", "Copyright", "農業部動植物防疫檢疫署"):
+            cut = content.find(marker)
+            if cut > 0:
+                content = content[:cut].strip()
         content = re.sub(r"\n{2,}", "\n", content)
         content = re.sub(r"[ \t]+", "", content)
 
