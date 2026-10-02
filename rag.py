@@ -19,6 +19,8 @@ from pydantic import BaseModel
 
 from db import get_db, CHROMA_PATH
 from auth import get_current_user
+import gcis
+import planner
 
 OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -271,7 +273,13 @@ question：若 type 是 on_topic，把最新的話改寫成「不需要看先前
   沿用使用者的作物俗名（說空心菜就寫空心菜），不要回答問題，只改寫。最新的話本身已經完整就原樣保留。
 reply：若 type 是 chitchat，用一兩句親切的繁體中文回應，並帶一句可以問什麼；其他情況留空字串。
 
-只回傳 JSON：{"type": "...", "question": "...", "reply": "..."}"""
+intent：若 type 是 on_topic，再判斷農友要的是哪一種協助：
+- "plan"：想知道「接下來要怎麼噴、噴藥順序、輪替用藥、用藥計畫、快要採收了該用什麼藥」這類需要排時程的問題
+- "qa"：其他一般問答（可以用什麼藥、稀釋倍數、法規、能不能用某藥…）
+days_to_harvest：若最新的話或先前對話提到距離採收還有幾天（例如「12天後採收」「兩週後要收成」→14），填整數，否則填 null。
+sprays：若提到想噴幾次，填整數，否則填 null。
+
+只回傳 JSON：{"type": "...", "question": "...", "reply": "...", "intent": "qa", "days_to_harvest": null, "sprays": null}"""
 
 
 def _history_lines(history: list, limit: int = 8) -> list:
@@ -305,9 +313,19 @@ def route_question(question: str, history: list) -> dict:
         data = json.loads(resp.content)
         rtype = data.get("type") if data.get("type") in ("on_topic", "chitchat", "off_topic") else "on_topic"
         rewritten = (data.get("question") or "").strip() or question
-        return {"type": rtype, "question": rewritten, "reply": (data.get("reply") or "").strip()}
+
+        def _int_or_none(v):
+            try:
+                return int(v) if v is not None and str(v).strip() != "" else None
+            except (TypeError, ValueError):
+                return None
+        return {"type": rtype, "question": rewritten, "reply": (data.get("reply") or "").strip(),
+                "intent": "plan" if data.get("intent") == "plan" else "qa",
+                "days_to_harvest": _int_or_none(data.get("days_to_harvest")),
+                "sprays": _int_or_none(data.get("sprays"))}
     except Exception:
-        return {"type": "on_topic", "question": question, "reply": ""}
+        return {"type": "on_topic", "question": question, "reply": "", "intent": "qa",
+                "days_to_harvest": None, "sprays": None}
 
 
 class NewsItem(BaseModel):
@@ -322,7 +340,7 @@ def split_questions(q: str) -> list:
 
 # ── 用藥處方卡：關鍵數值一律直接取自 SQLite 登記資料，不經 LLM 生成 ──────────
 CARD_COLUMNS = ("農藥中文普通名稱, 農藥含量, 劑型, 每公頃每次用量, 稀釋倍數, 使用時期, "
-                "施藥間隔, 施用次數, 安全採收期_天, 施用方法, 注意事項, 病蟲害名稱, 核准日期")
+                "施藥間隔, 施用次數, 安全採收期_天, 施用方法, 注意事項, 病蟲害名稱, 核准日期, 廠商名稱")
 
 
 def _clean(v):
@@ -355,7 +373,20 @@ def row_to_card(r, crop: str) -> dict:
         "method": _clean(d.get("施用方法")),
         "notes": _clean(d.get("注意事項")),
         "approved": _format_approved(d.get("核准日期")),
+        "maker": _clean(d.get("廠商名稱")),
     }
+
+
+def attach_makers(cards: list) -> list:
+    """農藥廠商查核：為每張處方卡附上登記廠商的公司登記現況（讀取快取，不即時呼叫外部 API）。"""
+    cache = gcis.get_cached(c.get("maker") for c in cards)
+    for c in cards:
+        info = cache.get(c.get("maker") or "")
+        c["maker_badge"] = gcis.maker_badge(info) if c.get("maker") else None
+        c["maker_ubn"] = (info or {}).get("ubn", "")
+        c["maker_capital"] = (info or {}).get("capital", "")
+        c["maker_setup"] = (info or {}).get("setup_date", "")
+    return cards
 
 
 def _match_pesticide(text: str, pesticide_names: list):
@@ -492,10 +523,12 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
     sql_ctx = ""
     sources = []
     cards = []
+    supply_ctx = ""
     if crop and ptype:
         rows = conn.execute(f"SELECT {CARD_COLUMNS} FROM pesticides WHERE 作物名稱=? AND {PTYPE_SQL[ptype]} GROUP BY 農藥中文普通名稱 LIMIT 15", (crop,)).fetchall()
         if rows:
             cards = [row_to_card(r, crop) for r in rows]
+            supply_ctx = gcis.supply_summary(r["廠商名稱"] for r in rows)
             sql_ctx = f"【{crop} {ptype}劑 精確查詢】\n" + "\n".join(f"• {r['農藥中文普通名稱']}：稀釋{r['稀釋倍數']}倍，{r['使用時期']}，採收期{r['安全採收期_天']}天" for r in rows)
             sources.append({"title": f"{crop}{ptype}劑登記資料", "url": "https://pesticide.aphia.gov.tw", "date": SOURCE_VERSIONS["pesticide"]})
 
@@ -529,6 +562,7 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
                 shown = all_rows[:12]
                 header = f"【{crop} {matched_pest} 登記用藥，資料庫共 {total} 種，以下列出主要 {len(shown)} 種】"
             cards = [row_to_card(r, crop) for r in shown]
+            supply_ctx = gcis.supply_summary(r["廠商名稱"] for r in all_rows)
             if shown:
                 sql_ctx = header + "\n" + \
                     "\n".join(f"• {r['農藥中文普通名稱']}：稀釋{r['稀釋倍數']}倍，{r['使用時期']}，採收期{r['安全採收期_天']}天" for r in shown)
@@ -669,6 +703,11 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
         residue_url = d.metadata.get("來源") or "https://consumer.fda.gov.tw"
         sources.append({"title": t, "url": residue_url, "date": SOURCE_VERSIONS["residue"]})
 
+    if supply_ctx:
+        context += "\n\n" + supply_ctx
+        sources.append({"title": "公司登記資料（廠商查核）", "url": "https://data.gcis.nat.gov.tw/od/detail?oid=8776818F-EB3C-445F-BE95-AE22577CBEBC", "date": "即時查核"})
+    cards = attach_makers(cards)
+
     if compliance:
         context = compliance_context(compliance) + "\n\n" + context
 
@@ -724,6 +763,10 @@ SYSTEM_PROMPT = r"""你是「農藥博士」，角色就像農會裡經驗豐富
 若題目包含多個子問題（標示為「1.」「2.」等），請針對每一個子問題分別回答，不要只回答其中一題就結束；子問題之間用簡短的過渡語或分段即可，不必使用「【子問題1】」這類制式標題。
 
 【用藥合法性檢查】若知識庫開頭有「【用藥合法性檢查：未登記】」，第一句必須明確說「不可以」，並用一句話說明原因（這款藥沒有登記用在這個作物，用了可能違規，採收的作物也可能被驗出不合格），不得提供該藥用於該作物的任何用法；接著像指導員一樣，建議改用這個作物有登記的藥劑或洽詢當地農會、植物醫師，若知道農友想防治的病蟲害，可以直接點出替代藥劑。若是「【用藥合法性檢查：已登記】」，第一句先說可以用、有登記，再提醒稀釋倍數與安全採收期要照標示。
+
+【輪替用藥計畫】若知識庫開頭有「【輪替用藥計畫（演算法排程，數字不得更改）】」，代表系統已經用演算法排好噴藥時程，畫面上也會顯示完整的計畫表。請用兩三句話說明這份計畫的重點：第幾天噴什麼、為什麼要換不同作用機制（避免抗藥性）、第幾天起可以安全採收；所有天數、藥名、稀釋倍數都必須照計畫內容，不可自行更改或增加。若計畫附有「提醒」，要一併轉達。若農友沒說距離採收還有幾天，最後要問他。
+
+【供應廠商】若知識庫有「【供應廠商分析】」，可視情況用一句話帶到；若其中有查無營業中登記的廠商，提醒農友向合法的農藥販賣業者購買、確認包裝上的許可證字號，不要點名指控特定公司。
 
 規則：藥劑名稱、稀釋倍數、用量、天數、法規條文只用知識庫資料，不推測；一般安全用藥觀念的提醒可以補充。繁體中文。若引用法規，需標明條號（如「依農藥管理法第29條」）。無資料則回「知識庫無此資訊，建議撥打 0800-022228」。若是多個子問題，且其中某些子問題有資料、某些沒有，請針對有資料的子問題正常回答，針對沒有資料的子問題單獨註明「該部分知識庫無此資訊」，不要因為其中一題沒資料就整體拒答。
 
@@ -794,6 +837,13 @@ async def ask(req: AskRequest):
         cards = [c for r in results for c in (r.get("cards") or [])][:24]
         compliance = [r["compliance"] for r in results if r.get("compliance")]
 
+        # 用藥決策引擎：農友要「怎麼噴」時，由演算法排出輪替用藥計畫（數字不經 AI）
+        plan = None
+        if route.get("intent") == "plan" and len(results) == 1 and results[0].get("crop") and results[0].get("pest"):
+            plan = planner.make_plan(results[0]["crop"], results[0]["pest"],
+                                     days_to_harvest=route.get("days_to_harvest"), sprays=route.get("sprays"))
+            results[0]["context"] = planner.plan_context(plan) + "\n\n" + results[0]["context"]
+
         if len(sub_questions) == 1:
             context = results[0]["context"]
             question_for_llm = sub_questions[0]
@@ -842,7 +892,7 @@ async def ask(req: AskRequest):
         current_crop = results[0].get("crop") if len(sub_questions) == 1 else None
         current_pest = results[0].get("pest") if len(sub_questions) == 1 else None
         return {"answer": answer, "sources": sources, "isRefusal": is_refusal, "crop": current_crop, "pest": current_pest,
-                "cards": cards, "compliance": compliance}
+                "cards": cards, "compliance": compliance, "plan": plan if not is_refusal else None}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -1030,3 +1080,25 @@ async def get_news(username: str = Depends(get_current_user)):
     news = json.loads(match.group())[:3]
     _news_cache.update({"date": today, "data": news})
     return news
+
+
+# ── 農藥廠商查核（商工行政資料開放平臺）──────────────────────
+router.include_router(gcis.router)
+try:
+    gcis.init_table()
+    gcis.start_background_refresh()
+except Exception as _e:
+    print(f"⚠️ 廠商查核初始化失敗：{_e}")
+
+
+# ── 用藥決策引擎 API（也可不經聊天直接呼叫）──────────────────
+class PlanRequest(BaseModel):
+    crop: str
+    pest: str
+    days_to_harvest: Optional[int] = None
+    sprays: Optional[int] = None
+
+
+@router.post("/api/plan", tags=["用藥決策"], summary="排出輪替用藥計畫")
+def make_plan_api(req: PlanRequest):
+    return planner.make_plan(req.crop, req.pest, req.days_to_harvest, req.sprays)

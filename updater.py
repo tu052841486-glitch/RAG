@@ -152,6 +152,14 @@ def update_pesticides(scraper=None, vectorstore_factory=None) -> dict:
             _log_finish(log_id, "aborted", total=len(old), message=msg)
             return {"status": "aborted", "message": msg}
 
+        # 作用機制（官網改版新增欄位）另存對照表，供「輪替用藥計畫」判斷抗藥性輪替
+        try:
+            import planner
+            moa_n = planner.save_moa_from_scrape(new_df)
+            print(f"🧪 作用機制對照：{moa_n} 種藥劑")
+        except Exception as e:
+            print(f"⚠️ 作用機制儲存失敗：{e}")
+
         for c in cols:
             if c not in new_df.columns:
                 new_df[c] = ""
@@ -331,6 +339,13 @@ def run_update(source: str = "all") -> dict:
             result["pesticides"] = update_pesticides()
         if source in ("all", "regulations"):
             result["regulations"] = update_regulations()
+        if result.get("pesticides", {}).get("status") in ("success", "no_change"):
+            # 登記資料更新後，重新查核新出現的農藥廠商
+            try:
+                import gcis
+                result["companies"] = gcis.refresh()
+            except Exception as e:
+                print(f"⚠️ 廠商查核失敗：{e}")
         print(f"🔄 資料更新完成：{result}")
         return result
     finally:
