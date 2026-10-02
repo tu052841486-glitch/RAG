@@ -6,6 +6,7 @@
   conversations.py 對話紀錄 API
   rag.py           檢索問答、農藥/法規查詢、用藥合法性檢查、處方卡、模擬考、新聞
   vision.py        拍照問藥（作物病蟲害影像辨識）
+  updater.py       資料自動更新（農藥登記用藥、農藥法規）
 本檔只負責建立 app、設定 CORS、掛載各模組路由，以及啟動時初始化。
 """
 import os
@@ -20,6 +21,7 @@ import auth
 import conversations
 import rag
 import vision
+import updater
 
 app = FastAPI(title="農藥博士 API", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -29,6 +31,7 @@ app.include_router(auth.router)
 app.include_router(conversations.router)
 app.include_router(rag.router)
 app.include_router(vision.router)
+app.include_router(updater.router)
 
 
 @app.get("/health", tags=["系統"], summary="系統健康檢查")
@@ -51,6 +54,8 @@ async def _startup_init_tables():
     init_auth_tables()
     init_conversation_table()
     print("✅ 帳號與對話紀錄資料表已就緒")
+    # 資料自動更新排程（每週日 03:00 台灣時間，背景執行，不影響服務）
+    updater.start_scheduler()
 
 
 @app.on_event("startup")
