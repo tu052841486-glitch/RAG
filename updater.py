@@ -27,7 +27,7 @@ MIN_RATIO = 0.8  # 新爬到的筆數低於現有 80% 視為異常，放棄更�
 
 router = APIRouter(tags=["資料更新"])
 _lock = threading.Lock()
-_state = {"running": False, "current": None}
+_state = {"running": False, "current": None, "progress": None}
 
 
 # ── 更新紀錄 ──────────────────────────────────────────────────
@@ -45,6 +45,10 @@ def init_update_table():
         total INTEGER DEFAULT 0,
         message TEXT
     )''')
+    # 後端重新啟動時，上次未完成的更新已隨程序結束，標示為「中斷」避免狀態誤導
+    conn.execute(
+        "UPDATE data_updates SET status='interrupted', finished_at=?, message='後端重新啟動，本次更新中斷' "
+        "WHERE status='running'", (_now(),))
     conn.commit()
     conn.close()
 
@@ -130,7 +134,7 @@ def _scrape_pesticides() -> pd.DataFrame:
     for leaf in leaves:
         if leaf["代碼"] in known:
             leaf["名稱"] = known[leaf["代碼"]]
-    rows = pf.crawl_all(leaves)
+    rows = pf.crawl_all(leaves, progress=lambda i, total: _state.update(progress=f"{i}/{total}"))
     if not rows:
         raise RuntimeError("沒有爬到任何登記資料")
     return pd.DataFrame(rows).drop_duplicates().fillna("").astype(str)
@@ -257,11 +261,33 @@ def update_regulations(scraper=None, rebuild_index=None) -> dict:
     log_id = _log_start("regulations")
     try:
         new_df = scraper()
+        cols6 = ["法規名稱", "章節", "條號", "條文內容", "版本日期", "來源網址"]
+        new_df = new_df[cols6].copy()
         conn = get_db()
         try:
-            old = conn.execute("SELECT 法規名稱, 條號, 條文內容, 版本日期 FROM regulations").fetchall()
+            db_df = pd.read_sql('SELECT 法規名稱, 章節, 條號, 條文內容, 版本日期, 來源網址 FROM regulations', conn).fillna("").astype(str)
         except Exception:
-            old = []
+            db_df = pd.DataFrame(columns=cols6)
+        # 基準資料：資料庫現有條文與專案內建的 law_articles.csv，取條文較多（較完整）的一份
+        csv_path = os.path.join(os.path.dirname(__file__), "law_articles.csv")
+        try:
+            csv_df = pd.read_csv(csv_path, encoding="utf-8-sig", dtype=str).fillna("")[cols6]
+        except Exception:
+            csv_df = pd.DataFrame(columns=cols6)
+
+        # 逐部法規檢查：某部法規擷取到的條文明顯少於基準（網頁結構異常），就沿用基準版本，不讓單一法規壞掉
+        kept_laws = []
+        parts = []
+        for law in sorted(set(db_df["法規名稱"]) | set(csv_df["法規名稱"]) | set(new_df["法規名稱"])):
+            n_new = new_df[new_df["法規名稱"] == law]
+            base = max((db_df[db_df["法規名稱"] == law], csv_df[csv_df["法規名稱"] == law]), key=len)
+            if len(base) and len(n_new) < len(base) * MIN_RATIO:
+                parts.append(base)
+                kept_laws.append(f"{law}（擷取 {len(n_new)} 條，少於原有 {len(base)} 條，沿用原版本）")
+            else:
+                parts.append(n_new)
+        new_df = pd.concat(parts, ignore_index=True) if parts else new_df
+        old = [tuple(r) for r in db_df[["法規名稱", "條號", "條文內容", "版本日期"]].itertuples(index=False)]
         if old and len(new_df) < len(old) * MIN_RATIO:
             conn.close()
             msg = f"新法規僅 {len(new_df)} 條，低於現有 {len(old)} 條的 {int(MIN_RATIO * 100)}%，判定為爬取異常，本次不更新"
@@ -274,7 +300,8 @@ def update_regulations(scraper=None, rebuild_index=None) -> dict:
         new_set = {(r["法規名稱"], norm(r["條號"]), norm(r["條文內容"])) for _, r in new_df.iterrows()}
         if old_set == new_set:
             conn.close()
-            _log_finish(log_id, "no_change", total=len(old), message="法規條文無異動")
+            _log_finish(log_id, "no_change", total=len(old),
+                        message="法規條文無異動" + (("；" + "；".join(kept_laws)) if kept_laws else ""))
             return {"status": "no_change", "total": len(old)}
 
         old_keys = {(a, b): c for a, b, c in old_set}
@@ -283,7 +310,7 @@ def update_regulations(scraper=None, rebuild_index=None) -> dict:
         removed = [k for k in old_keys if k not in new_keys]
         amended = [k for k in new_keys if k in old_keys and new_keys[k] != old_keys[k]]
 
-        df = new_df[["法規名稱", "章節", "條號", "條文內容", "版本日期", "來源網址"]].copy()
+        df = new_df[cols6].copy()
         df.insert(0, "id", range(1, len(df) + 1))
         with conn:
             df.to_sql("regulations", conn, if_exists="replace", index=False)
@@ -295,6 +322,8 @@ def update_regulations(scraper=None, rebuild_index=None) -> dict:
 
         detail = "、".join(f"{a}{b}" for a, b in (amended + added)[:20])
         msg = f"修正 {len(amended)} 條、新增 {len(added)} 條、刪除 {len(removed)} 條" + (f"：{detail}" if detail else "")
+        if kept_laws:
+            msg += "；" + "；".join(kept_laws)
         _log_finish(log_id, "success", len(added), len(removed), len(amended), len(df), msg)
         return {"status": "success", "added": len(added), "removed": len(removed), "changed": len(amended), "total": len(df)}
     except Exception as e:
@@ -349,7 +378,7 @@ def run_update(source: str = "all") -> dict:
         print(f"🔄 資料更新完成：{result}")
         return result
     finally:
-        _state.update(running=False, current=None)
+        _state.update(running=False, current=None, progress=None)
         _lock.release()
 
 
@@ -405,6 +434,7 @@ def data_status():
     return {
         "自動更新": "每週日 03:00（台灣時間）" if AUTO_UPDATE else "已關閉",
         "更新中": _state["running"],
+        "爬取進度": _state.get("progress"),
         "農藥登記最近更新": last_success("pesticides"),
         "法規最近更新": last_success("regulations"),
         "資料筆數": counts,

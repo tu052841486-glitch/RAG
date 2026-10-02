@@ -91,6 +91,15 @@ def scrape_one_law(law_name: str, url: str):
             cut = content.find(marker)
             if cut > 0:
                 content = content[:cut].strip()
+        # 附件檔名（如「附件農作物農藥殘留限量表.pdf」）與「相關連結」區塊屬於頁面元素，不是條文
+        m_att = re.search(r"附件[^。\n]{0,60}?\.(?:pdf|docx?|odt|xlsx?)", content, re.I)
+        if m_att and m_att.start() > 0:
+            content = content[:m_att.start()].strip()
+        cut = content.find("相關連結")
+        if cut > 0:
+            content = content[:cut].strip()
+        # 條文以跳脫字元嵌在 HTML 屬性中，還原後最後一條結尾會殘留屬性的引號與角括號（如「">」）
+        content = re.sub(r'["\'＂]?\s*/?>\s*$', "", content).strip()
         content = re.sub(r"\n{2,}", "\n", content)
         content = re.sub(r"[ \t]+", "", content)
 

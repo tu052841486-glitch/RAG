@@ -161,7 +161,7 @@ def parse_result_table(html, farm_code, crop_name):
     return rows
 
 
-def crawl_all(leaf_farms):
+def crawl_all(leaf_farms, progress=None):
     print(f"\nStep 3: crawling {len(leaf_farms)} crops...")
     all_rows = []
     total = len(leaf_farms)
@@ -180,6 +180,8 @@ def crawl_all(leaf_farms):
                 print(f"  [{i}/{total}] {name} ({code}): status {r.status_code}")
         except Exception as e:
             print(f"  [{i}/{total}] {name} ({code}): error {e}")
+        if progress:
+            progress(i, total)
         time.sleep(DELAY)
     return all_rows
 
