@@ -142,6 +142,23 @@ def reciprocal_rank_fusion(rank_lists: list, k: int = 60, top_n: int = 5):
     return sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:top_n]
 
 
+# 爬蟲資料清理：農業試驗所諮詢問答頁面的答案結尾常夾帶網頁導覽文字
+# （例如「文件 無 回上一頁」「文件 xxxProFile.PDF 回上一頁」），顯示前一律去除
+_PAGE_JUNK_RE = re.compile(
+    r"[\s\u00a0]*文件[\s\u00a0]*(?:無|[^\s\u00a0]*\.(?:pdf|docx?|xlsx?|odt|ods|zip))?[\s\u00a0]*回上一頁[\s\u00a0]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_page_junk(text) -> str:
+    if text is None:
+        return ""
+    t = str(text)
+    t = _PAGE_JUNK_RE.sub("", t)
+    t = re.sub(r"[\s\u00a0]*回上一頁[\s\u00a0]*$", "", t)
+    return t.replace("\u00a0", " ").strip()
+
+
 class SimpleDoc:
     def __init__(self, page_content: str, metadata: dict):
         self.page_content = page_content
@@ -164,7 +181,7 @@ _TABLE_CONFIG = {
     "qa_knowledge": {
         "fetch_columns": ["問題", "答案", "來源類別", "分類", "來源網址"],
         "score_columns": ["問題", "答案"],
-        "content_fn": lambda d: f"問：{d.get('問題','')}\n答：{d.get('答案','')}",
+        "content_fn": lambda d: f"問：{_strip_page_junk(d.get('問題',''))}\n答：{_strip_page_junk(d.get('答案',''))}",
         "metadata_fn": lambda d: {"來源類別": d.get("來源類別", ""), "分類": d.get("分類", ""), "來源": d.get("來源網址", "")},
     },
     "residue_limits": {
@@ -219,7 +236,11 @@ def hybrid_retrieve(table_name: str, vectorstore, query: str, k: int = 5, vector
             if len(final_ids) >= k:
                 break
 
-    return [SimpleDoc(pool[i][0], pool[i][1]) for i in final_ids[:k] if i in pool]
+    docs = [SimpleDoc(pool[i][0], pool[i][1]) for i in final_ids[:k] if i in pool]
+    if table_name == "qa_knowledge":
+        for d in docs:
+            d.page_content = "\n".join(_strip_page_junk(line) for line in d.page_content.split("\n"))
+    return docs
 
 
 # ── 請求模型 ──────────────────────────────────────────────────
@@ -958,16 +979,16 @@ def generate_quiz(category: str = Query("all"), count: int = Query(10), username
                     "SELECT 問題,答案,分類 FROM qa_knowledge "
                     "WHERE length(答案) > 10 AND length(答案) < 80 ORDER BY RANDOM() LIMIT 30"
                 ).fetchall()
-                all_ans = [r["答案"] for r in rows]
+                all_ans = [_strip_page_junk(r["答案"]) for r in rows]
                 for r in rows:
-                    correct = r["答案"]
+                    correct = _strip_page_junk(r["答案"])
                     wrong = distractors(correct, all_ans)
                     if len(wrong) < 3:
                         continue
                     opts = wrong + [correct]
                     random.shuffle(opts)
                     questions.append({
-                        "question": r["問題"],
+                        "question": _strip_page_junk(r["問題"]),
                         "options": opts,
                         "answer_index": opts.index(correct),
                         "explanation": "參考資料來源：農藥合理使用問答集。",
