@@ -8,6 +8,7 @@
 資料來源（政府資料開放授權條款－第1版，免費、免金鑰）：
   - 公司登記關鍵字查詢 API（以公司名稱查統一編號）
   - 公司登記基本資料-應用一 API（以統一編號查公司現況與基本資料）
+  - 公司登記基本資料-應用三 API（以統一編號查營業項目，確認是否登記農藥製造／批發／零售）
   https://data.gcis.nat.gov.tw/od/detail?oid=8776818F-EB3C-445F-BE95-AE22577CBEBC
 
 設計：
@@ -28,6 +29,8 @@ from db import get_db
 TPE = timezone(timedelta(hours=8))
 SEARCH_API = "https://data.gcis.nat.gov.tw/od/data/api/6BBA2268-1367-4B42-9CCA-BC17499EBE8C"
 DETAIL_API = "https://data.gcis.nat.gov.tw/od/data/api/5F64D864-61CB-4D0D-8AD9-492047CC1EA6"
+ITEMS_API = "https://data.gcis.nat.gov.tw/od/data/api/236EE382-4942-41A9-BD03-CA0709025E7C"  # 公司登記基本資料-應用三（營業項目）
+PESTICIDE_ITEMS = {"C802070": "農藥製造業", "F107040": "農藥批發業", "F207040": "農藥零售業"}
 SOURCE_NAME = "經濟部商業發展署商工行政資料開放平臺"
 REFRESH_DAYS = 7
 NON_COMPANY_KEYWORDS = ("公務預算", "農會", "試驗所", "改良場", "政府", "大學", "研究院")
@@ -50,6 +53,9 @@ def init_table():
         setup_date TEXT,
         checked_at TEXT
     )''')
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(company_registry)").fetchall()]
+    if "pesticide_items" not in cols:
+        conn.execute("ALTER TABLE company_registry ADD COLUMN pesticide_items TEXT")
     conn.commit()
     conn.close()
 
@@ -112,6 +118,17 @@ def lookup_company(name: str) -> dict:
         flt2 = quote(f"Business_Accounting_NO eq {ubn}")
         d = _get_json(f"{DETAIL_API}?$format=json&$filter={flt2}&$skip=0")
         detail = d[0] if d else {}
+    # 3) 以統一編號查營業項目，確認是否登記農藥製造／批發／零售（公司登記基本資料-應用三）
+    items = []
+    if ubn:
+        try:
+            flt3 = quote(f"Business_Accounting_NO eq {ubn}")
+            d3 = _get_json(f"{ITEMS_API}?$format=json&$filter={flt3}&$skip=0&$top=1")
+            biz = (d3[0].get("Cmp_Business") or []) if d3 else []
+            codes = {(b.get("Business_Item") or "").strip() for b in biz}
+            items = [name for code, name in PESTICIDE_ITEMS.items() if code in codes]
+        except Exception:
+            items = None
     src = {**match, **detail}
     capital = src.get("Paid_In_Capital_Amount") or src.get("Capital_Stock_Amount")
     return {
@@ -120,16 +137,18 @@ def lookup_company(name: str) -> dict:
         "status_desc": (src.get("Company_Status_Desc") or "核准設立").strip(),
         "capital": _money(capital),
         "setup_date": _roc_date(src.get("Company_Setup_Date")),
+        "pesticide_items": None if items is None else "、".join(items),
     }
 
 
 def _save(name: str, info: dict):
     conn = get_db()
     conn.execute(
-        "INSERT OR REPLACE INTO company_registry (name, kind, ubn, status_desc, capital, setup_date, checked_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO company_registry (name, kind, ubn, status_desc, capital, setup_date, checked_at, pesticide_items) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (name, info.get("kind"), info.get("ubn", ""), info.get("status_desc", ""),
-         info.get("capital", ""), info.get("setup_date", ""), datetime.now(TPE).strftime("%Y-%m-%d %H:%M")),
+         info.get("capital", ""), info.get("setup_date", ""), datetime.now(TPE).strftime("%Y-%m-%d %H:%M"),
+         info.get("pesticide_items")),
     )
     conn.commit()
     conn.close()
@@ -144,10 +163,13 @@ def refresh(force: bool = False) -> dict:
             "SELECT DISTINCT 廠商名稱 FROM pesticides WHERE 廠商名稱 IS NOT NULL AND 廠商名稱 != ''").fetchall()]
     except Exception:
         names = []
-    cached = {r[0]: r[1] for r in conn.execute("SELECT name, checked_at FROM company_registry").fetchall()}
+    rows = conn.execute("SELECT name, checked_at, kind, pesticide_items FROM company_registry").fetchall()
     conn.close()
+    cached = {r[0]: r[1] for r in rows}
+    # 舊版快取沒有營業項目資料的公司，也要重新查一次
+    no_items = {r[0] for r in rows if r[2] == "company" and r[3] is None}
     limit = (datetime.now(TPE) - timedelta(days=REFRESH_DAYS)).strftime("%Y-%m-%d %H:%M")
-    todo = [n for n in names if force or n not in cached or (cached[n] or "") < limit]
+    todo = [n for n in names if force or n not in cached or n in no_items or (cached[n] or "") < limit]
     done = errors = 0
     for n in todo:
         try:
@@ -188,12 +210,13 @@ def get_cached(names) -> dict:
     try:
         conn = get_db()
         rows = conn.execute(
-            f"SELECT name, kind, ubn, status_desc, capital, setup_date FROM company_registry "
+            f"SELECT name, kind, ubn, status_desc, capital, setup_date, pesticide_items FROM company_registry "
             f"WHERE name IN ({','.join('?' * len(names))})", names).fetchall()
         conn.close()
     except Exception:
         return {}
-    return {r[0]: {"kind": r[1], "ubn": r[2], "status": r[3], "capital": r[4], "setup_date": r[5]} for r in rows}
+    return {r[0]: {"kind": r[1], "ubn": r[2], "status": r[3], "capital": r[4], "setup_date": r[5],
+                   "pesticide_items": r[6]} for r in rows}
 
 
 def maker_badge(info: dict) -> dict:
@@ -204,7 +227,15 @@ def maker_badge(info: dict) -> dict:
     if kind == "company":
         status = info.get("status") or "核准設立"
         ok = status in ("核准設立",)
-        return {"level": "ok" if ok else "warn", "label": "營業中" if ok else status}
+        if not ok:
+            return {"level": "warn", "label": status}
+        items = info.get("pesticide_items")
+        if items:
+            main = next((n for n in ("農藥製造業", "農藥批發業", "農藥零售業") if n in items), items)
+            return {"level": "ok", "label": f"營業中・登記{main}", "items": items}
+        if items == "":
+            return {"level": "ok", "label": "營業中", "items": "營業項目未見農藥相關登記"}
+        return {"level": "ok", "label": "營業中"}
     if kind == "non_company":
         return {"level": "info", "label": "非公司組織（如政府單位、農會）"}
     if kind == "branch":
@@ -221,7 +252,10 @@ def supply_summary(makers) -> str:
         return ""
     cache = get_cached(makers)
     warn = [m for m in makers if maker_badge(cache.get(m)).get("level") == "warn"]
+    with_items = [m for m in makers if (cache.get(m) or {}).get("pesticide_items")]
     s = f"【供應廠商分析（資料來源：{SOURCE_NAME}）】以上登記用藥由 {len(makers)} 家廠商登記供應"
+    if with_items:
+        s += f"，其中 {len(with_items)} 家在公司登記中登記有農藥製造、批發或零售營業項目"
     if warn:
         s += f"，其中 {len(warn)} 家在公司登記資料中查無營業中紀錄（{'、'.join(warn[:5])}），購買時建議確認來源"
     return s + "。"
@@ -233,10 +267,13 @@ def companies_summary():
     init_table()
     conn = get_db()
     rows = conn.execute("SELECT kind, status_desc, COUNT(*) FROM company_registry GROUP BY kind, status_desc").fetchall()
+    item_rows = conn.execute("SELECT pesticide_items FROM company_registry WHERE kind='company'").fetchall()
     last = conn.execute("SELECT MAX(checked_at) FROM company_registry").fetchone()[0]
     conn.close()
     return {"資料來源": SOURCE_NAME, "最近查核": last,
-            "統計": [{"類型": r[0], "公司現況": r[1], "家數": r[2]} for r in rows]}
+            "統計": [{"類型": r[0], "公司現況": r[1], "家數": r[2]} for r in rows],
+            "營業項目查核": {name: sum(1 for (it,) in item_rows if it and name in it) for name in PESTICIDE_ITEMS.values()}
+                        | {"未見農藥相關登記": sum(1 for (it,) in item_rows if it == "")}}
 
 
 @router.get("/api/companies/lookup", summary="查詢單一廠商的公司登記")
