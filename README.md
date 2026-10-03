@@ -1,31 +1,90 @@
-# 農藥知識問答系統
+# 基於檢索增強生成（RAG）之農藥專家知識庫系統
 
-## 啟動步驟
+> 讓農民用對藥，也買對藥。
+
+結合生成式 AI 與檢索增強生成（RAG），整合農業部農藥登記資料、經濟部商工行政開放資料與農藥法規，
+讓農民用白話提問或拍一張照片，就能查到「在台灣合法、數字正確」的用藥建議。
+
+- 前端：https://pesticide-doctor-frontend.vercel.app/
+- 後端 API 文件：https://pesticide-doctor-api.fly.dev/docs
+- 資料更新紀錄：https://pesticide-doctor-api.fly.dev/api/data/status
+
+---
+
+## 核心設計：數字不經 AI 生成
+
+生成式 AI 只負責理解問題、改寫追問與白話說明；稀釋倍數、用量、施藥間隔、安全採收期、噴藥排程與廠商資料，
+一律由資料庫、演算法與官方 API 產生，從架構上避免 AI 編造安全攸關的數字。
+
+## 功能：七步驟用藥鏈
+
+| 步驟 | 功能 | 說明 |
+|---|---|---|
+| ① 認病 | 拍照問藥 | GPT-4o 辨識作物與病蟲害候選，農民確認後才查詢用藥 |
+| ② 選藥 | RAG 智慧問答 | 混合檢索官方資料，以農會指導員口吻回答；支援連續追問、作物俗名 |
+| ③ 確認合法 | 用藥合法性檢查 | 農藥未登記於該作物即紅色警示「不可以」 |
+| ④ 買對藥 | 廠商查核、販賣業者查詢 | 查核登記廠商是否營業中；依鄉鎮列出登記農藥零售／批發的公司 |
+| ⑤ 排好怎麼噴 | 輪替用藥計畫 | 演算法依安全採收期、施藥間隔、施用次數與作用機制輪替排出噴藥時程 |
+| ⑥ 用對量 | 用藥處方卡 | 稀釋倍數、一桶水加藥量、安全採收期等數值直接取自資料庫 |
+| ⑦ 資訊正確 | 資料自動更新 | 每週同步官方登記資料與法規，具異常防護與更新紀錄 |
+
+另提供農藥百科卡、學習教材與安全用藥自我檢測，以及會員對話紀錄。
+
+## 系統架構
+
+```
+React 前端（Vercel）
+   │  REST API
+FastAPI 後端（Fly.io，Docker）
+   ├─ rag.py        檢索問答、合法性檢查、處方卡、主題判斷與追問改寫
+   ├─ vision.py     拍照問藥（作物病蟲害影像辨識）
+   ├─ planner.py    用藥決策引擎（輪替用藥計畫）
+   ├─ gcis.py       農藥廠商查核（商工行政資料開放平臺）
+   ├─ dealers.py    合法農藥販賣業者查詢（商工行政資料開放平臺）
+   ├─ updater.py    資料自動更新（農藥登記、法規）
+   ├─ auth.py / conversations.py   帳號與對話紀錄
+   └─ db.py         SQLite（結構化資料）、ChromaDB（向量資料庫）
+```
+
+- 檢索：SQLite 精準查詢＋向量語意檢索（text-embedding-3-small）＋BM25 關鍵字檢索，以 RRF 融合排序
+- 生成式 AI：GPT-4o（問答、影像辨識）、GPT-4o-mini（主題判斷、追問改寫）
+
+## 資料來源
+
+| 資料提供機關 | 資料集 |
+|---|---|
+| 經濟部商業發展署 | 公司登記基本資料-應用一、公司登記關鍵字查詢、營業項目代碼（F零售、批發及餐飲業）查公司、公司行號營業項目代碼表 |
+| 農業部動植物防疫檢疫署 | 農藥資訊服務網－病蟲害防治用藥登記資料、農藥相關法規 |
+| 衛生福利部 | 農藥殘留容許量標準 |
+| 農業部農業藥物試驗所 | 農藥諮詢服務問答、農藥合理使用問答集 |
+| 農業部 | 主管法規查詢系統（法規交叉比對） |
+| 毒藥物防治諮詢中心 | 農藥中毒處理資料 |
+
+資料依「政府資料開放授權條款－第1版」使用並標示來源。
+
+## 本機啟動
 
 ### 後端
 ```bash
-cd pesticide-backend
 pip install -r requirements.txt
-# 建立 .env 填入 API key
-cp .env.example .env
-
-# 第一次執行（向量化，約3-5分鐘）
-python build_index.py
-
-# 啟動後端
+cp .env.example .env          # 填入 OPENAI_API_KEY
+python build_db.py            # 建立 SQLite 資料庫
+python build_index.py         # 建立向量索引（約 3–5 分鐘）
 uvicorn main:app --reload --port 8000
-``
-後台：http://localhost:8000/dashboard`
-前台：http://localhost:3000
-### 前端
-```bash
-cd pesticide-frontend
-npm install
-npm start
 ```
 
+### 前端
+```bash
+cd frontend
+npm install
+npm start                     # http://localhost:3000
+```
 
+## 部署
 
-前端:https://pesticide-doctor-frontend.vercel.app/
+- 後端：`fly deploy`（記憶體 2GB、常駐運作，資料存放於持久化磁碟）
+- 前端：推送至 GitHub 後由 Vercel 自動建置
 
-後端:https://pesticide-doctor-api.fly.dev/dashboard
+## 注意事項
+
+本系統資訊僅供參考，實際用藥請依農藥標示；營業項目登記不等於持有農藥販賣業執照，購買前請確認店家執照與農藥許可證字號。
