@@ -21,6 +21,7 @@ from db import get_db, CHROMA_PATH
 from auth import get_current_user
 import gcis
 import planner
+import dealers
 
 OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -275,6 +276,7 @@ reply：若 type 是 chitchat，用一兩句親切的繁體中文回應，並帶
 
 intent：若 type 是 on_topic，再判斷農友要的是哪一種協助：
 - "plan"：想知道「接下來要怎麼噴、噴藥順序、輪替用藥、用藥計畫、快要採收了該用什麼藥」這類需要排時程的問題
+- "dealer"：想知道去哪裡買農藥、附近有哪些農藥行或農藥販賣店
 - "qa"：其他一般問答（可以用什麼藥、稀釋倍數、法規、能不能用某藥…）
 days_to_harvest：若最新的話或先前對話提到距離採收還有幾天（例如「12天後採收」「兩週後要收成」→14），填整數，否則填 null。
 sprays：若提到想噴幾次，填整數，否則填 null。
@@ -320,7 +322,7 @@ def route_question(question: str, history: list) -> dict:
             except (TypeError, ValueError):
                 return None
         return {"type": rtype, "question": rewritten, "reply": (data.get("reply") or "").strip(),
-                "intent": "plan" if data.get("intent") == "plan" else "qa",
+                "intent": data.get("intent") if data.get("intent") in ("plan", "dealer") else "qa",
                 "days_to_harvest": _int_or_none(data.get("days_to_harvest")),
                 "sprays": _int_or_none(data.get("sprays"))}
     except Exception:
@@ -374,6 +376,7 @@ def row_to_card(r, crop: str) -> dict:
         "notes": _clean(d.get("注意事項")),
         "approved": _format_approved(d.get("核准日期")),
         "maker": _clean(d.get("廠商名稱")),
+        "bucket": planner.bucket_amount(_clean(d.get("稀釋倍數")), _clean(d.get("劑型"))),
     }
 
 
@@ -764,7 +767,9 @@ SYSTEM_PROMPT = r"""你是「農藥博士」，角色就像農會裡經驗豐富
 
 【用藥合法性檢查】若知識庫開頭有「【用藥合法性檢查：未登記】」，第一句必須明確說「不可以」，並用一句話說明原因（這款藥沒有登記用在這個作物，用了可能違規，採收的作物也可能被驗出不合格），不得提供該藥用於該作物的任何用法；接著像指導員一樣，建議改用這個作物有登記的藥劑或洽詢當地農會、植物醫師，若知道農友想防治的病蟲害，可以直接點出替代藥劑。若是「【用藥合法性檢查：已登記】」，第一句先說可以用、有登記，再提醒稀釋倍數與安全採收期要照標示。
 
-【輪替用藥計畫】若知識庫開頭有「【輪替用藥計畫（演算法排程，數字不得更改）】」，代表系統已經用演算法排好噴藥時程，畫面上也會顯示完整的計畫表。請用兩三句話說明這份計畫的重點：第幾天噴什麼、為什麼要換不同作用機制（避免抗藥性）、第幾天起可以安全採收；所有天數、藥名、稀釋倍數都必須照計畫內容，不可自行更改或增加。若計畫附有「提醒」，要一併轉達。若計畫標題已經寫明「距離採收 N 天」，代表農友已經講過採收日，絕對不要再反問採收天數；只有計畫沒有採收天數時，最後才問他。
+【輪替用藥計畫】若知識庫開頭有「【輪替用藥計畫（演算法排程，數字不得更改）】」，代表系統已經用演算法排好噴藥時程，畫面上會顯示完整的計畫表（含日期、一桶水加多少藥）。這時文字回答**最多三句**，不要把計畫表的每個數字再列一遍：第一句講結論（用日期說，例如「今天先噴免速達，10/10 再換亞克瑞」），第二句說為什麼要換不同類的藥（避免抗藥性），第三句說哪一天起可以安全採收。不要提 IRAC、FRAC 這類代碼，改說「殺蟲第幾類」或「不同類的藥」。所有日期、藥名都必須照計畫內容，不可自行更改或增加。若計畫附有「提醒」，要一併轉達。若計畫標題已經寫明「距離採收 N 天」，代表農友已經講過採收日，絕對不要再反問採收天數；只有計畫沒有採收天數時，最後才問他。
+
+【農藥販賣業者】若知識庫有「【合法農藥販賣業者查詢】」，用兩三句話告訴農友該地區有幾家登記農藥零售或批發的公司、可以看下方清單與地址，並一定要提醒「營業項目登記不等於持有農藥販賣業執照，購買前請確認店家有縣市政府核發的執照、產品有農藥許可證字號」。不要自行推薦或評價特定店家。
 
 【供應廠商】若知識庫有「【供應廠商分析】」，可視情況用一句話帶到；若其中有查無營業中登記的廠商，提醒農友向合法的農藥販賣業者購買、確認包裝上的許可證字號，不要點名指控特定公司。
 
@@ -824,6 +829,25 @@ async def ask(req: AskRequest):
             return {"answer": reply, "sources": [], "isRefusal": False,
                     "crop": req.prev_crop, "pest": req.prev_pest, "cards": [], "compliance": []}
 
+        # 1.5) 合法農藥販賣業者查詢（商工行政資料開放平臺）：不需要農藥知識檢索，直接查資料庫
+        if route.get("intent") == "dealer":
+            counties, town = dealers.find_location(original_q + " " + route.get("question", ""))
+            if not counties and not town:
+                return {"answer": "可以幫你找有登記賣農藥的店家！請告訴我你在哪個縣市、哪個鄉鎮，例如「嘉義縣民雄鄉哪裡可以買農藥？」",
+                        "sources": [], "isRefusal": False, "crop": req.prev_crop, "pest": req.prev_pest,
+                        "cards": [], "compliance": []}
+            dres = dealers.query_dealers(counties, town, limit=20)
+            llm_d = ChatOpenAI(model=os.environ.get("ANSWER_MODEL", "gpt-4o"), temperature=0.3, openai_api_key=OPENAI_API_KEY)
+            resp_d = llm_d.invoke([
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=f"知識庫：\n{dealers.dealer_context(dres)}\n\n問題：{original_q}"),
+            ])
+            return {"answer": resp_d.content, "sources": [{"title": "公司登記資料（營業項目：農藥零售／批發）",
+                    "url": "https://data.gcis.nat.gov.tw/od/detail?oid=8776818F-EB3C-445F-BE95-AE22577CBEBC",
+                    "date": (dres.get("checked_at") or "")[:10].replace("-", "/") + " 更新"}],
+                    "isRefusal": False, "crop": req.prev_crop, "pest": req.prev_pest,
+                    "cards": [], "compliance": [], "dealers": dres}
+
         # 2) 用改寫後的完整問題去檢索（追問已補上作物／病蟲害，換作物也能正確切換）
         q = route["question"] if history else original_q
         sub_questions = split_questions(q)
@@ -840,8 +864,11 @@ async def ask(req: AskRequest):
         # 用藥決策引擎：農友要「怎麼噴」時，由演算法排出輪替用藥計畫（數字不經 AI）
         plan = None
         if route.get("intent") == "plan" and len(results) == 1 and results[0].get("crop") and results[0].get("pest"):
+            from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+            today_tpe = _dt.now(_tz(_td(hours=8))).date()
             plan = planner.make_plan(results[0]["crop"], results[0]["pest"],
-                                     days_to_harvest=route.get("days_to_harvest"), sprays=route.get("sprays"))
+                                     days_to_harvest=route.get("days_to_harvest"), sprays=route.get("sprays"),
+                                     start=today_tpe)
             results[0]["context"] = planner.plan_context(plan) + "\n\n" + results[0]["context"]
 
         if len(sub_questions) == 1:
@@ -1084,9 +1111,12 @@ async def get_news(username: str = Depends(get_current_user)):
 
 # ── 農藥廠商查核（商工行政資料開放平臺）──────────────────────
 router.include_router(gcis.router)
+router.include_router(dealers.router)
 try:
     gcis.init_table()
     gcis.start_background_refresh()
+    dealers.init_table()
+    dealers.start_background_refresh()
 except Exception as _e:
     print(f"⚠️ 廠商查核初始化失敗：{_e}")
 

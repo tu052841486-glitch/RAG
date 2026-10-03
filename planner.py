@@ -51,6 +51,40 @@ def parse_moa(text):
     return groups
 
 
+MOA_KIND = {"IRAC": "殺蟲", "FRAC": "殺菌", "HRAC": "除草"}
+WEEK = "一二三四五六日"
+BUCKET_L = 16          # 常見背負式噴霧桶容量（公升）
+SOLID_FORMS = ("WP", "WG", "SG", "SP", "DF", "GR", "DP", "WDG")
+
+
+def moa_labels(groups) -> list:
+    """IRAC 14 → 殺蟲第14類（農民看得懂的說法）。"""
+    out = []
+    for g in sorted(groups or []):
+        system, _, code = g.partition(" ")
+        out.append(f"{MOA_KIND.get(system, system)}第{code}類")
+    return out
+
+
+def date_label(d: date, today: date = None) -> str:
+    s = f"{d.month}/{d.day}（{WEEK[d.weekday()]}）"
+    return "今天 " + s if today and d == today else s
+
+
+def bucket_amount(dilution: str, formulation: str = "", liters: int = BUCKET_L) -> str:
+    """稀釋倍數 → 一桶水要加多少藥。例如 1000 倍、16 公升 → 16 毫升。數值由公式計算，不經 AI。"""
+    nums = [float(x.replace(",", "")) for x in re.findall(r"\d[\d,]*\.?\d*", str(dilution or ""))]
+    nums = [n for n in nums if n >= 10]
+    if not nums:
+        return ""
+    unit = "公克" if str(formulation or "").upper().strip() in SOLID_FORMS else "毫升"
+    amounts = sorted(liters * 1000 / n for n in (min(nums), max(nums)))
+    fmt = lambda v: f"{v:.1f}".rstrip("0").rstrip(".")
+    if abs(amounts[0] - amounts[1]) < 0.05:
+        return f"一桶 {liters} 公升加 {fmt(amounts[0])} {unit}"
+    return f"一桶 {liters} 公升加 {fmt(amounts[0])}～{fmt(amounts[1])} {unit}"
+
+
 # ── 讀取候選藥劑 ──────────────────────────────────────────────
 def init_moa_table():
     conn = get_db()
@@ -190,17 +224,21 @@ def make_plan(crop: str, pest: str, days_to_harvest=None, sprays=None, start: da
             reasons.append(f"安全採收期 {c['phi']} 天")
         if c["moa"]:
             if i == 0:
-                reasons.append(f"作用機制 {'、'.join(sorted(c['moa']))}")
+                reasons.append(f"屬於{'、'.join(moa_labels(c['moa']))}")
             elif seq[i - 1][1]["moa"]:
-                reasons.append(f"換成作用機制 {'、'.join(sorted(c['moa']))}，與上一次不同，降低抗藥性風險")
+                reasons.append(f"換成{'、'.join(moa_labels(c['moa']))}，跟上一次不同類，比較不會產生抗藥性")
             else:
-                reasons.append(f"作用機制 {'、'.join(sorted(c['moa']))}")
+                reasons.append(f"屬於{'、'.join(moa_labels(c['moa']))}")
         if c["maker_badge"] and c["maker_badge"].get("level") == "ok":
             reasons.append("登記廠商營業中")
+        d = (start + timedelta(days=day)) if start else None
         result["steps"].append({
             "order": i + 1,
             "day": day + 1,                     # 以「第 1 天」為開始噴藥日
-            "date": (start + timedelta(days=day)).isoformat() if start else None,
+            "date": d.isoformat() if d else None,
+            "date_label": date_label(d, start) if d else None,
+            "bucket": bucket_amount(c["dilution"], c["formulation"]),
+            "moa_labels": moa_labels(c["moa"]),
             "name": c["name"],
             "dilution": c["dilution"],
             "dosage": c["dosage"],
@@ -216,6 +254,10 @@ def make_plan(crop: str, pest: str, days_to_harvest=None, sprays=None, start: da
 
     ready = max(day + (c["phi"] or 0) for day, c in seq)
     result["harvest_ready_day"] = ready + 1
+    if start:
+        result["harvest_ready_date_label"] = date_label(start + timedelta(days=ready))
+        if days_to_harvest is not None:
+            result["harvest_date_label"] = date_label(start + timedelta(days=days_to_harvest))
     if len(seq) < n:
         result["warnings"].append(
             f"在採收期限內只能安排 {len(seq)} 次噴藥（原本希望 {n} 次），若蟲害嚴重請搭配物理防治。")
@@ -234,9 +276,12 @@ def plan_context(plan: dict) -> str:
     lines = [f"【輪替用藥計畫（演算法排程，數字不得更改）】{plan['crop_display']}・{plan['pest']}"
              + (f"・距離採收 {plan['days_to_harvest']} 天" if plan.get("days_to_harvest") is not None else "")]
     for s in plan["steps"]:
-        lines.append(f"第 {s['day']} 天：{s['name']}（稀釋 {s['dilution'] or '依標示'} 倍；{s['reason']}）")
-    lines.append(f"以今天為第 1 天起算，第 {plan['harvest_ready_day']} 天起即可安全採收"
-                 + (f"（預計採收日為第 {plan['days_to_harvest'] + 1} 天，符合安全採收期）。" if plan.get("days_to_harvest") is not None else "。"))
+        when = s.get("date_label") or f"第 {s['day']} 天"
+        lines.append(f"{when}：{s['name']}（稀釋 {s['dilution'] or '依標示'} 倍"
+                     + (f"，{s['bucket']}" if s.get("bucket") else "") + f"；{s['reason']}）")
+    ready = plan.get("harvest_ready_date_label") or f"第 {plan['harvest_ready_day']} 天"
+    lines.append(f"{ready}起即可安全採收"
+                 + (f"（預計採收日 {plan.get('harvest_date_label') or ''}，符合安全採收期）。" if plan.get("days_to_harvest") is not None else "。"))
     for w in plan.get("warnings") or []:
         lines.append(f"提醒：{w}")
     return "\n".join(lines)
