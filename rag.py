@@ -300,6 +300,18 @@ def _history_lines(history: list, limit: int = 8) -> list:
     return lines
 
 
+# 規則把關：問句含明確的農藥領域詞時，不允許被 AI 判成無關或閒聊（避免誤拒答）
+# 刻意不含「下雨」這類天氣詞，天氣問題仍交由 AI 判斷為無關
+DOMAIN_TERMS = ['農藥', '藥劑', '噴藥', '施藥', '用藥', '病蟲害', '病害', '蟲害', '中毒', '急救',
+                '殺蟲', '殺菌', '除草', '殺蟎', '安全採收期', '稀釋', '許可證', '農藥行', '販賣業', '殘留']
+
+
+def _has_domain_term(text: str) -> bool:
+    t = (text or "").replace("農藥博士", "")
+    crops = list(CROP_ALIASES) + list(CROP_ALIASES.values())
+    return any(w in t for w in DOMAIN_TERMS) or any(len(c) >= 2 and c in t for c in crops)
+
+
 def route_question(question: str, history: list) -> dict:
     """主題判斷＋追問改寫。失敗時保守地當作 on_topic、原問題照用，不影響原本功能。"""
     from langchain_openai import ChatOpenAI
@@ -316,6 +328,8 @@ def route_question(question: str, history: list) -> dict:
         ])
         data = json.loads(resp.content)
         rtype = data.get("type") if data.get("type") in ("on_topic", "chitchat", "off_topic") else "on_topic"
+        if rtype != "on_topic" and _has_domain_term(question):
+            rtype = "on_topic"
         rewritten = (data.get("question") or "").strip() or question
 
         def _int_or_none(v):
