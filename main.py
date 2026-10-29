@@ -7,10 +7,13 @@
   rag.py           檢索問答、農藥/法規查詢、用藥合法性檢查、處方卡、模擬考、新聞
   vision.py        拍照問藥（作物病蟲害影像辨識）
   updater.py       資料自動更新（農藥登記用藥、農藥法規）
+  health.py        系統健康檢查（SQLite / ChromaDB / OpenAI）
 本檔只負責建立 app、設定 CORS、掛載各模組路由，以及啟動時初始化。
 """
+from dotenv import load_dotenv
+load_dotenv()  # 本機讀 .env；Fly.io 上無 .env，改用 fly secrets
+
 import os
-from datetime import date
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,6 +25,7 @@ import conversations
 import rag
 import vision
 import updater
+import health
 
 app = FastAPI(title="農藥博士 API", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -32,11 +36,7 @@ app.include_router(conversations.router)
 app.include_router(rag.router)
 app.include_router(vision.router)
 app.include_router(updater.router)
-
-
-@app.get("/health", tags=["系統"], summary="系統健康檢查")
-def health():
-    return {"狀態": "正常", "日期": str(date.today())}
+app.include_router(health.router)
 
 
 # dashboard 靜態頁（若檔案存在）
