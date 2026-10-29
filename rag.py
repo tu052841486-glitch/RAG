@@ -263,9 +263,11 @@ ROUTER_PROMPT = """你是農藥問答系統的前置判斷器。請根據「先�
 
 type 只能是以下三種之一：
 - "on_topic"：與農業、作物、病蟲害、雜草、農藥、施藥、稀釋計算、農藥殘留、食品安全、農藥法規、農藥中毒急救有關。
+  想開農藥行、經營農藥店、申請農藥販賣業執照或許可證、參加農藥管理人員訓練，都屬於農藥法規，是 on_topic。
   換了一種作物或病蟲害（例如先問木瓜、再問「那芒果呢？」）仍然是 on_topic。
-- "chitchat"：打招呼、道謝、稱讚、問你是誰這類閒聊。
+- "chitchat"：打招呼、道謝、稱讚、問你是誰這類閒聊。只要內容提到農藥、作物、病蟲害或農藥行，就不是 chitchat。
 - "off_topic"：與上述農業／農藥主題無關的問題（例如寫程式、數學作業、股票、旅遊、娛樂、一般常識）。
+  詢問今天天氣、氣溫、會不會下雨這類即時天氣資訊，本系統沒有天氣資料，一律是 off_topic，不要當成閒聊回應。
 
 question：若 type 是 on_topic，把最新的話改寫成「不需要看先前對話也能看懂」的完整問題，補上從先前對話推得出的作物、病蟲害、農藥名稱。
   例如先前在談「木瓜炭疽病」，最新的話是「那芒果呢？」→「芒果炭疽病要用什麼藥？」；
@@ -276,7 +278,7 @@ reply：若 type 是 chitchat，用一兩句親切的繁體中文回應，並帶
 
 intent：若 type 是 on_topic，再判斷農友要的是哪一種協助：
 - "plan"：想知道「接下來要怎麼噴、噴藥順序、輪替用藥、用藥計畫、快要採收了該用什麼藥」這類需要排時程的問題
-- "dealer"：想知道去哪裡買農藥、附近有哪些農藥行或農藥販賣店
+- "dealer"：想知道去哪裡買農藥、附近有哪些農藥行或農藥販賣店（想「自己開」農藥行、申請販賣執照則屬於 qa）
 - "qa"：其他一般問答（可以用什麼藥、稀釋倍數、法規、能不能用某藥…）
 days_to_harvest：若最新的話或先前對話提到距離採收還有幾天（例如「12天後採收」「兩週後要收成」→14），填整數，否則填 null。
 sprays：若提到想噴幾次，填整數，否則填 null。
@@ -443,6 +445,12 @@ PESTICIDE_ALIASES = {
     "呋喃丹": "加保扶",
 }
 
+# 口語用詞 → 法規正式用語（讓「開農藥行」能檢索到「農藥販賣業」相關條文）
+TERM_ALIASES = {
+    "農藥行": "農藥販賣業",
+    "農藥店": "農藥販賣業",
+}
+
 SOURCE_VERSIONS = {
     "pesticide": "2026年擷取",
     "law": "2026年擷取",
@@ -451,7 +459,7 @@ SOURCE_VERSIONS = {
     "poison": "2026年擷取",
 }
 
-LAW_KEYWORDS = ['法規','罰則','罰鍰','違法','違規','許可證','禁用','偽農藥','劣農藥','販賣業','登記',
+LAW_KEYWORDS = ['農藥行','農藥店','開店','執照','法規','罰則','罰鍰','違法','違規','許可證','禁用','偽農藥','劣農藥','販賣業','登記',
                 '殘留','超標','抽驗','檢驗','訓練','證書','展延','管理人員','規費','收費']
 QA_KEYWORDS = ['中午','噴藥時機','施藥時機','混用','混合','桶混','抗藥性','雨季','下雨',
                '飄散','飄移','過期','保存','劑型','餌劑','系統性','接觸性','天敵',
@@ -466,7 +474,7 @@ CALC_KEYWORDS = ['計算', '換算', 'ppm', '倍數', '公升', '毫升', '公�
 
 # 自建斷詞詞典：補上俗名對照與各類關鍵詞（須在第一次斷詞前註冊）
 tokenizer.add_terms(list(CROP_ALIASES) + list(CROP_ALIASES.values()) + list(PESTICIDE_ALIASES)
-                    + list(PESTICIDE_ALIASES.values()) + LAW_KEYWORDS + QA_KEYWORDS + RESIDUE_KEYWORDS)
+                    + list(PESTICIDE_ALIASES.values()) + list(TERM_ALIASES.values()) + LAW_KEYWORDS + QA_KEYWORDS + RESIDUE_KEYWORDS)
 
 
 def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, is_followup: bool = False) -> dict:
@@ -481,6 +489,9 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
             crop_alias_used = (alias, official)
     for alias, official in PESTICIDE_ALIASES.items():
         if alias in q_normalized and official != alias and official not in q_normalized:
+            q_normalized = q_normalized.replace(alias, official)
+    for alias, official in TERM_ALIASES.items():
+        if alias in q_normalized:
             q_normalized = q_normalized.replace(alias, official)
 
     def _crop_matches(crop_name, text):
