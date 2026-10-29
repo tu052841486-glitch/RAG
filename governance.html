@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>藥你安心｜AI 治理與病害通報</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+:root{
+  --forest:#0F4A34; --forest-2:#1E6B4E; --leaf:#DCEAE2; --paper:#F5FAF7; --line:#CFE0D5;
+  --ink:#16241C; --muted:#56635B; --amber:#E8B04A; --rust:#C4472F; --warn-bg:#FCEFD4;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Noto Sans TC','Microsoft JhengHei',sans-serif;background:var(--paper);color:var(--ink);line-height:1.6}
+header{background:var(--forest);color:#E6F1EC;padding:22px clamp(16px,4vw,48px) 20px}
+header h1{font-size:clamp(22px,3vw,30px);font-weight:900;letter-spacing:.02em}
+header p{font-size:14px;color:#B7DDC7;margin-top:4px}
+main{max-width:1240px;margin:0 auto;padding:22px clamp(14px,3vw,40px) 60px}
+.bar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px}
+.bar select,.bar input[type=password]{font:inherit;font-size:14px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;background:#fff;color:var(--ink)}
+.bar label{font-size:14px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.btn{font:inherit;font-size:14px;padding:7px 14px;border-radius:8px;border:1px solid var(--forest);background:var(--forest);color:#fff;cursor:pointer}
+.btn.ghost{background:#fff;color:var(--forest)}
+.btn:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--amber);outline-offset:2px}
+.spacer{flex:1}
+.demo-note{background:var(--warn-bg);border:1px solid #F0DBA0;color:#6B4A00;border-radius:10px;padding:10px 14px;font-size:14px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:18px}
+@media (max-width:860px){.grid{grid-template-columns:1fr}}
+.panel{background:#fff;border:1px solid var(--line);border-radius:14px;padding:18px 20px}
+.panel h2{font-size:17px;font-weight:700;color:var(--forest);margin-bottom:4px}
+.panel .sub{font-size:13px;color:var(--muted);margin-bottom:14px}
+/* 縣市方格地圖 */
+.tilemap{display:grid;grid-template-columns:repeat(5,1fr);grid-auto-rows:clamp(48px,7vw,64px);gap:6px;max-width:420px;margin:0 auto}
+.tile{border-radius:8px;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:clamp(11px,1.4vw,13px);font-weight:700;background:#EEF2EF;color:#7A867F;border:1px solid transparent;cursor:default;text-align:center;line-height:1.25}
+.tile b{font-size:clamp(14px,1.9vw,18px);font-weight:900}
+.tile.supp{background:repeating-linear-gradient(135deg,#EEF2EF 0 6px,#E1E8E3 6px 12px);color:#7A867F}
+.tile.has{color:var(--ink)}
+.tile.hot{color:#fff}
+.legend{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:14px;justify-content:center;flex-wrap:wrap}
+.legend .ramp{width:120px;height:10px;border-radius:5px;background:linear-gradient(90deg,#DCEFE3,#F3C969,#C4472F)}
+.legend .sw{width:14px;height:10px;border-radius:3px;background:repeating-linear-gradient(135deg,#EEF2EF 0 3px,#D5DDD8 3px 6px)}
+/* 排行 */
+.rank{list-style:none}
+.rank li{display:grid;grid-template-columns:1fr auto;gap:4px 10px;padding:8px 0;border-bottom:1px solid #EEF2EF;font-size:15px}
+.rank li:last-child{border-bottom:none}
+.rank .meter{grid-column:1/-1;height:6px;border-radius:3px;background:#EEF2EF;overflow:hidden}
+.rank .meter i{display:block;height:100%;background:var(--forest-2);border-radius:3px}
+.rank .n{font-weight:700;color:var(--forest)}
+.empty{font-size:14px;color:var(--muted);padding:10px 0}
+/* 治理指標 */
+.kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:18px 0}
+@media (max-width:760px){.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.kpi{background:#fff;border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.kpi .v{font-size:28px;font-weight:900;color:var(--forest);line-height:1.2}
+.kpi .l{font-size:13px;color:var(--muted)}
+.stack{display:flex;height:14px;border-radius:7px;overflow:hidden;background:#EEF2EF;margin:8px 0 6px}
+.stack span{display:block;height:100%}
+.keys{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.keys i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.tablewrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px;min-width:640px}
+th{text-align:left;font-weight:500;color:var(--muted);font-size:13px;padding:8px 10px;border-bottom:1px solid var(--line)}
+td{padding:9px 10px;border-bottom:1px solid #EEF2EF}
+.tag{display:inline-block;font-size:12px;padding:2px 8px;border-radius:10px;background:var(--leaf);color:var(--forest)}
+.tag.rej{background:#FBE4E1;color:#7A1712}.tag.pen{background:#EEF2EF;color:var(--muted)}
+.principles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:18px}
+@media (max-width:860px){.principles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.principles div{background:#fff;border-left:4px solid var(--forest);border-radius:8px;padding:12px 14px;font-size:14px}
+.principles strong{display:block;color:var(--forest);margin-bottom:2px}
+#gate{max-width:420px;margin:60px auto;background:#fff;border:1px solid var(--line);border-radius:14px;padding:24px}
+#gate h2{font-size:18px;color:var(--forest);margin-bottom:8px}
+#gate p{font-size:14px;color:var(--muted);margin-bottom:14px}
+#gate form{display:flex;gap:8px}
+#gate input{flex:1;font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:8px}
+#err{color:var(--rust);font-size:14px;margin-top:10px}
+</style>
+</head>
+<body>
+<header>
+  <h1>AI 治理與病害通報</h1>
+  <p>藥你安心｜拍照判讀的稽核紀錄，以及由使用者確認後彙整的病害熱區</p>
+</header>
+
+<div id="gate" hidden>
+  <h2>請輸入管理密碼</h2>
+  <p>此頁面僅供管理端使用（ADMIN_TOKEN），密碼只保存在這個分頁中。</p>
+  <form id="gateForm"><input id="tokenIn" type="password" autocomplete="off" aria-label="管理密碼"><button class="btn">進入</button></form>
+  <div id="err" role="alert"></div>
+</div>
+
+<main id="app" hidden>
+  <div class="bar">
+    <label>期間
+      <select id="days"><option value="7">近 7 天</option><option value="30" selected>近 30 天</option><option value="90">近 90 天</option></select>
+    </label>
+    <label>作物 <select id="crop"><option value="">全部</option></select></label>
+    <label>病蟲害 <select id="pest"><option value="">全部</option></select></label>
+    <label><input type="checkbox" id="demo" checked> 包含示範資料</label>
+    <span class="spacer"></span>
+    <button class="btn ghost" id="seed">產生示範資料</button>
+    <button class="btn ghost" id="clear">清除示範資料</button>
+  </div>
+  <div id="demoNote" class="demo-note" hidden></div>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>病害通報熱區</h2>
+      <div class="sub" id="mapSub">只計入使用者按下「確認」的判讀</div>
+      <div class="tilemap" id="tilemap" role="img" aria-label="臺灣各縣市病害通報數方格地圖"></div>
+      <div class="legend"><span>少</span><span class="ramp"></span><span>多</span><span class="sw"></span><span id="kNote">未滿 3 筆不顯示</span></div>
+    </section>
+    <div style="display:grid;gap:18px;align-content:start">
+      <section class="panel">
+        <h2>熱區鄉鎮</h2>
+        <div class="sub">通報數最多的鄉鎮市區</div>
+        <ul class="rank" id="towns"></ul>
+      </section>
+      <section class="panel">
+        <h2>通報最多的病蟲害</h2>
+        <div class="sub">作物與病蟲害組合</div>
+        <ul class="rank" id="pests"></ul>
+      </section>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="v" id="kTotal">—</div><div class="l">拍照判讀次數</div></div>
+    <div class="kpi"><div class="v" id="kAccept">—</div><div class="l">使用者採納率</div></div>
+    <div class="kpi"><div class="v" id="kReject">—</div><div class="l">使用者否決率（AI 判錯）</div></div>
+    <div class="kpi"><div class="v" id="kPending">—</div><div class="l">未回覆</div></div>
+  </div>
+
+  <section class="panel">
+    <h2>判讀等級分布</h2>
+    <div class="stack" id="healthBar"></div>
+    <div class="keys" id="healthKeys"></div>
+    <div class="sub" style="margin:10px 0 0" id="models"></div>
+  </section>
+
+  <section class="panel" style="margin-top:18px">
+    <h2>稽核紀錄</h2>
+    <div class="sub">最近的判讀：AI 提出什麼、使用者怎麼回應。不保存照片與帳號。</div>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>時間</th><th>模型</th><th>判定</th><th>作物</th><th>AI 首選</th><th>使用者回應</th><th>縣市</th></tr></thead>
+        <tbody id="audit"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="principles">
+    <div><strong>人在迴路中</strong>AI 只提出候選，使用者確認後才查詢用藥、才計入熱區。</div>
+    <div><strong>數字不經 AI</strong>藥名、稀釋倍數、安全採收期一律取自農藥登記資料。</div>
+    <div><strong>資料最小化</strong>不存照片、不綁帳號，位置自願填寫且只到鄉鎮。</div>
+    <div><strong>去識別化</strong>區域通報未滿 3 筆不顯示數字，避免反推特定農戶。</div>
+  </div>
+</main>
+
+<script>
+const TILES = [
+  ['連江縣',0,0],['臺北市',3,0],['基隆市',4,0],
+  ['桃園市',2,1],['新北市',3,1],
+  ['新竹市',1,2],['新竹縣',2,2],['宜蘭縣',3,2],
+  ['金門縣',0,3],['苗栗縣',1,3],['臺中市',2,3],['花蓮縣',3,3,2],
+  ['彰化縣',1,4],['南投縣',2,4],
+  ['雲林縣',0,5],['嘉義市',1,5],['嘉義縣',2,5],['臺東縣',3,5,2],
+  ['澎湖縣',0,6],['臺南市',1,6],['高雄市',2,6],
+  ['屏東縣',2,7],
+];
+const HEALTH = {diseased:['明顯病徵','#C4472F'],suspect:['疑似異常','#E8B04A'],healthy:['健康','#1E6B4E'],unknown:['無法判讀','#B9C4BD']};
+const STATUS = {confirmed:['使用者確認',''],rejected:['都不是（否決）','rej'],pending:['未回覆','pen']};
+const $ = id => document.getElementById(id);
+let token = sessionStorage.getItem('pd_admin') || '';
+
+function mix(a,b,t){const p=h=>[1,3,5].map(i=>parseInt(h.slice(i,i+2),16));const x=p(a),y=p(b);return '#'+x.map((v,i)=>Math.round(v+(y[i]-v)*t).toString(16).padStart(2,'0')).join('');}
+function heat(t){return t<.5?mix('#DCEFE3','#F3C969',t/.5):mix('#F3C969','#C4472F',(t-.5)/.5);}
+function esc(s){return String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+const pct = v => v==null ? '—' : Math.round(v*100)+'%';
+
+async function api(path, opt={}){
+  const r = await fetch(path,{...opt,headers:{'X-Admin-Token':token,...(opt.headers||{})}});
+  if(r.status===401||r.status===503){
+    const d = await r.json().catch(()=>({}));
+    sessionStorage.removeItem('pd_admin'); token='';
+    showGate(d.detail || '管理密碼錯誤');
+    throw new Error('auth');
+  }
+  return r.json();
+}
+
+function showGate(msg){ $('app').hidden=true; $('gate').hidden=false; $('err').textContent=msg||''; $('tokenIn').focus(); }
+
+function fillSelect(el, opts){
+  const cur = el.value;
+  el.innerHTML = '<option value="">全部</option>' + opts.map(o=>`<option${o===cur?' selected':''}>${esc(o)}</option>`).join('');
+}
+
+function rank(el, items, label){
+  if(!items.length){ el.innerHTML='<li class="empty">目前沒有達到 3 筆的資料</li>'; return; }
+  const max = Math.max(...items.map(i=>i.count));
+  el.innerHTML = items.slice(0,8).map(i=>`<li><span>${esc(label(i))}</span><span class="n">${i.count}</span><span class="meter"><i style="width:${(i.count/max*100).toFixed(1)}%"></i></span></li>`).join('');
+}
+
+async function load(){
+  const q = new URLSearchParams({days:$('days').value, include_demo:$('demo').checked});
+  const hq = new URLSearchParams(q); if($('crop').value) hq.set('crop',$('crop').value); if($('pest').value) hq.set('pest',$('pest').value);
+  const [hm, gv] = await Promise.all([api('/api/admin/diagnosis/heatmap?'+hq), api('/api/admin/diagnosis/governance?'+q)]);
+
+  fillSelect($('crop'), hm.options.crops); fillSelect($('pest'), hm.options.pests);
+  $('kNote').textContent = `未滿 ${hm.k_min} 筆不顯示`;
+  $('mapSub').textContent = `只計入使用者按下「確認」的判讀，共 ${hm.total} 筆`;
+  const dn = $('demoNote');
+  dn.hidden = !(hm.demo_rows && $('demo').checked);
+  dn.textContent = `目前畫面包含示範資料（${hm.demo_rows} 筆）。正式上線後，熱區會由實際的拍照判讀自動累積。`;
+
+  const byCounty = Object.fromEntries(hm.counties.map(c=>[c.county,c]));
+  const max = Math.max(1,...hm.counties.map(c=>c.count||0));
+  $('tilemap').innerHTML = TILES.map(([name,x,y,span])=>{
+    const c = byCounty[name]; const pos = `grid-column:${x+1};grid-row:${y+1}${span?` / span ${span}`:''}`;
+    const short = ['新竹市','新竹縣','嘉義市','嘉義縣'].includes(name) ? name : name.slice(0,2);
+    if(!c) return `<div class="tile" style="${pos}" title="${name}：無通報">${short}</div>`;
+    if(c.suppressed) return `<div class="tile supp" style="${pos}" title="${name}：未滿 ${hm.k_min} 筆">${short}<span>&lt;${hm.k_min}</span></div>`;
+    const t = c.count/max;
+    return `<div class="tile has${t>.62?' hot':''}" style="${pos};background:${heat(t)}" title="${name}：${c.count} 筆">${short}<b>${c.count}</b></div>`;
+  }).join('');
+
+  rank($('towns'), hm.towns, i=>i.county+i.town);
+  rank($('pests'), hm.pests, i=>`${i.crop}・${i.pest}`);
+
+  $('kTotal').textContent = gv.total;
+  $('kAccept').textContent = pct(gv.accept_rate);
+  $('kReject').textContent = pct(gv.reject_rate);
+  $('kPending').textContent = gv.pending;
+  const hsum = Object.values(gv.health).reduce((a,b)=>a+b,0) || 1;
+  const order = ['diseased','suspect','healthy','unknown'];
+  $('healthBar').innerHTML = order.filter(k=>gv.health[k]).map(k=>`<span style="width:${gv.health[k]/hsum*100}%;background:${HEALTH[k][1]}" title="${HEALTH[k][0]}"></span>`).join('');
+  $('healthKeys').innerHTML = order.filter(k=>gv.health[k]).map(k=>`<span><i style="background:${HEALTH[k][1]}"></i>${HEALTH[k][0]} ${gv.health[k]}</span>`).join('');
+  $('models').textContent = '使用模型：' + Object.entries(gv.models).map(([m,n])=>`${m === 'demo' ? '示範資料' : m}（${n} 次）`).join('，');
+
+  $('audit').innerHTML = gv.audit.length ? gv.audit.map(a=>{
+    const [sl,sc] = STATUS[a.status] || [a.status,''];
+    const resp = a.status==='confirmed' && a.confirmed_pest ? `${sl}：${esc(a.confirmed_pest)}` : sl;
+    return `<tr><td>${esc(a.time.slice(5,16))}</td><td>${a.demo?'示範':esc(a.model)}</td><td>${(HEALTH[a.health]||[a.health])[0]}</td><td>${esc(a.crop)}</td><td>${esc(a.ai_top)}</td><td><span class="tag ${sc}">${resp}</span></td><td>${esc(a.county)||'—'}</td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="empty">尚無判讀紀錄</td></tr>';
+}
+
+function start(){ $('gate').hidden=true; $('app').hidden=false; load().catch(e=>{ if(e.message!=='auth') alert('載入失敗：'+e.message); }); }
+
+$('gateForm').addEventListener('submit', e=>{ e.preventDefault(); token=$('tokenIn').value.trim(); if(!token) return; sessionStorage.setItem('pd_admin',token); start(); });
+['days','crop','pest','demo'].forEach(id=>$(id).addEventListener('change', ()=>load().catch(()=>{})));
+$('seed').addEventListener('click', async ()=>{ const r=await api('/api/admin/diagnosis/demo',{method:'POST'}); alert(`已產生 ${r.inserted} 筆示範資料`); $('demo').checked=true; load(); });
+$('clear').addEventListener('click', async ()=>{ if(!confirm('確定清除所有示範資料？')) return; const r=await api('/api/admin/diagnosis/demo',{method:'DELETE'}); alert(`已清除 ${r.deleted} 筆`); load(); });
+
+token ? start() : showGate();
+</script>
+</body>
+</html>

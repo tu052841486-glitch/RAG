@@ -8,6 +8,7 @@
   vision.py        拍照問藥（作物病蟲害影像辨識）
   updater.py       資料自動更新（農藥登記用藥、農藥法規）
   health.py        系統健康檢查（SQLite / ChromaDB / OpenAI）
+  diagnosis.py     拍照判讀紀錄、病害通報熱區、AI 治理儀表板（/governance）
 本檔只負責建立 app、設定 CORS、掛載各模組路由，以及啟動時初始化。
 """
 from dotenv import load_dotenv
@@ -26,6 +27,7 @@ import rag
 import vision
 import updater
 import health
+import diagnosis
 
 app = FastAPI(title="農藥博士 API", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -37,6 +39,7 @@ app.include_router(rag.router)
 app.include_router(vision.router)
 app.include_router(updater.router)
 app.include_router(health.router)
+app.include_router(diagnosis.router)
 
 
 # dashboard 靜態頁（若檔案存在）
@@ -53,6 +56,7 @@ def dashboard():
 async def _startup_init_tables():
     init_auth_tables()
     init_conversation_table()
+    diagnosis.init_table()
     print("✅ 帳號與對話紀錄資料表已就緒")
     # 資料自動更新排程（每週日 03:00 台灣時間，背景執行，不影響服務）
     updater.start_scheduler()
