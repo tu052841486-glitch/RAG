@@ -12,7 +12,7 @@ from datetime import date
 from typing import Optional
 
 import httpx
-import jieba
+import tokenizer
 from rank_bm25 import BM25Okapi
 from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
@@ -114,7 +114,7 @@ def get_bm25_index(table_name: str, fetch_columns: list, score_columns: list):
     for row in rows:
         d = dict(row)
         text = " ".join(str(d.get(c) or "") for c in score_columns)
-        corpus_tokens.append(list(jieba.cut(text)))
+        corpus_tokens.append(tokenizer.tokenize(text))
         docs_meta.append(d)
 
     if not corpus_tokens:
@@ -131,7 +131,7 @@ def bm25_search(table_name: str, fetch_columns: list, score_columns: list, query
     if not index:
         return []
     bm25, docs_meta = index
-    query_tokens = list(jieba.cut(query))
+    query_tokens = tokenizer.tokenize(query)
     scores = bm25.get_scores(query_tokens)
     ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
     return [docs_meta[i] for i in ranked[:k] if scores[i] > 0]
@@ -462,6 +462,11 @@ QA_KEYWORDS = ['中午','噴藥時機','施藥時機','混用','混合','桶混'
 RESIDUE_KEYWORDS = ['殘留容許量', '殘留標準', '最大殘留限量', 'ppm', '容許量', '殘留量', '殘留限量', 'MRL']
 CALC_KEYWORDS = ['計算', '換算', 'ppm', '倍數', '公升', '毫升', '公頃', '甲', '分地',
                  '稀釋', '調配', '需要多少', '幾桶', '桶數']
+
+
+# 自建斷詞詞典：補上俗名對照與各類關鍵詞（須在第一次斷詞前註冊）
+tokenizer.add_terms(list(CROP_ALIASES) + list(CROP_ALIASES.values()) + list(PESTICIDE_ALIASES)
+                    + list(PESTICIDE_ALIASES.values()) + LAW_KEYWORDS + QA_KEYWORDS + RESIDUE_KEYWORDS)
 
 
 def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, is_followup: bool = False) -> dict:
