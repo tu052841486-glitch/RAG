@@ -463,6 +463,7 @@ PESTICIDE_ALIASES = {
 TERM_ALIASES = {
     "農藥行": "農藥販賣業",
     "農藥店": "農藥販賣業",
+    "無人機": "無人飛行載具",
 }
 
 SOURCE_VERSIONS = {
@@ -473,7 +474,7 @@ SOURCE_VERSIONS = {
     "poison": "2026年擷取",
 }
 
-LAW_KEYWORDS = ['農藥行','農藥店','開店','執照','法規','罰則','罰鍰','違法','違規','許可證','禁用','偽農藥','劣農藥','販賣業','登記',
+LAW_KEYWORDS = ['農藥行','農藥店','開店','執照','無人機','無人飛行','空中施藥','代噴','法規','罰則','罰鍰','違法','違規','許可證','禁用','偽農藥','劣農藥','販賣業','登記',
                 '殘留','超標','抽驗','檢驗','訓練','證書','展延','管理人員','規費','收費']
 QA_KEYWORDS = ['中午','噴藥時機','施藥時機','混用','混合','桶混','抗藥性','雨季','下雨',
                '飄散','飄移','過期','保存','劑型','餌劑','系統性','接觸性','天敵',
@@ -505,8 +506,8 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
         if alias in q_normalized and official != alias and official not in q_normalized:
             q_normalized = q_normalized.replace(alias, official)
     for alias, official in TERM_ALIASES.items():
-        if alias in q_normalized:
-            q_normalized = q_normalized.replace(alias, official)
+        if alias in q_normalized and official not in q_normalized:
+            q_normalized += f"（{official}）"
 
     def _crop_matches(crop_name, text):
         """判斷作物是否命中：完整名稱出現、或複合名稱（用空格分隔，如「檬果 芒果」）
@@ -632,6 +633,33 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
     compliance = None
     if crop and matched_pesticide:
         compliance = check_compliance(conn, crop, matched_pesticide, crop_alias_used)
+    # 作物＋農藥：直接查出該藥的登記用法（含每公頃每次用量），計算題一律以此為準，數字不經 AI 生成
+    usage_ctx = ""
+    if crop and matched_pesticide:
+        sql_u = ("SELECT 病蟲害名稱, 農藥含量, 劑型, 稀釋倍數, 每公頃每次用量, 安全採收期_天, 施藥間隔 "
+                 "FROM pesticides WHERE 作物名稱=? AND 農藥中文普通名稱=?")
+        params_u = [crop, matched_pesticide]
+        if matched_pest:
+            sql_u += " AND 病蟲害名稱=?"
+            params_u.append(matched_pest)
+        urows = conn.execute(sql_u + " LIMIT 6", params_u).fetchall()
+        if urows:
+            def _per_bucket(r):
+                """一桶 16 公升水的加藥量 = 16000 ÷ 稀釋倍數；倍數為範圍（如 1000-1500）時兩端都換算。"""
+                nums = [float(x) for x in re.findall(r"\d+(?:\.\d+)?", _clean(r['稀釋倍數']).replace(',', ''))[:2] if float(x) > 0]
+                if not nums:
+                    return "無法換算"
+                unit = "公克" if any(k in _clean(r['劑型']) for k in ("粉", "粒")) else "毫升"
+                amts = sorted({round(16000 / x, 1) for x in nums})
+                return "～".join(f"{a:g}" for a in amts) + f" {unit}"
+            usage_ctx = (f"【{matched_pesticide} 用於 {crop} 的登記用法（精確查詢，計算一律以此為準）】\n" + "\n".join(
+                f"• {r['病蟲害名稱']}：{_clean(r['農藥含量'])}{_clean(r['劑型'])}，稀釋 {_clean(r['稀釋倍數']) or '未標示'} 倍，"
+                f"一桶 16 公升水加藥 {_per_bucket(r)}，"
+                f"每公頃每次用量 {_clean(r['每公頃每次用量']) or '未標示'}，安全採收期 {_clean(r['安全採收期_天']) or '未標示'} 天，"
+                f"施藥間隔 {_clean(r['施藥間隔']) or '未標示'}" for r in urows))
+            if all(not _clean(r['每公頃每次用量']) for r in urows):
+                usage_ctx += ("\n（登記資料沒有每公頃每次用量。回答時只能用上面的「一桶 16 公升水加藥量」說明，"
+                              "並請農友依實際要噴幾桶自行累加；絕對不可以假設每公頃用水量、也不可以舉例假設任何數字）")
     if matched_pesticide:
         try:
             residue_rows = conn.execute(
@@ -701,6 +729,8 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
         residue_docs = hybrid_retrieve("residue_limits", residue_vs, q_normalized, k=5)
 
     context = sql_ctx
+    if usage_ctx:
+        context = usage_ctx + ("\n\n" + context if context else "")
     if residue_sql_ctx:
         context += ("\n\n" + residue_sql_ctx) if context else residue_sql_ctx
     if law_sql_ctx:
@@ -823,6 +853,7 @@ SYSTEM_PROMPT = r"""你是「農藥博士」，角色就像農會裡經驗豐富
 - 務必逐步列出計算式，每一步驟都明確標示單位（公升、毫升、公克、ppm等），不可跳步驟。
 - ppm（百萬分之一）之標準定義為「每公升幾毫克」（1 ppm = 1 mg/L），計算時務必依此定義，不可自行創造其他換算方式。
 - 若題目明確指示「改用某種計算方法」（如「改用倍數法」），需完全依該方法計算，不可與其他方法（如標籤標示用量）混用或疊加計算。
+- 計算用藥量時，若知識庫有「每公頃每次用量」，一律用它乘以面積計算；若標示為「未標示」，絕對不可以自行假設每公頃用水量或任何數字，應說明登記資料沒有每公頃用量，請農友依農藥標籤，或告訴我每公頃大約噴多少公升水，再用稀釋倍數換算。
 - 計算完成後，請自行檢查結果是否合理（例如藥液原液量是否符合實務上的常見範圍），若結果明顯不合理（過大或過小），請重新檢查每一步驟的單位換算是否正確。
 
 【計算範例，示範正確的推理方式】
