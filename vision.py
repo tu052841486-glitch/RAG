@@ -7,6 +7,8 @@
   3. 模型輸出經過防護：照顧建議中若出現藥劑字眼一律濾除。
   4. 候選結果對應回正式作物／病蟲害名稱，使用者確認後才查詢合法用藥（人在迴路中）。
   5. 每次判讀都寫入 diagnosis_log（時間、模型、等級），形成稽核軌跡；不保存照片與帳號。
+  6. 多語：判讀與資料比對一律以中文進行；外語介面只翻譯「顯示用」文字，
+     病蟲害與作物的中文原名保留在 name／crop 供查詢合法用藥，翻譯另存 name_display／crop_display。
 """
 import os
 import re
@@ -39,6 +41,63 @@ router = APIRouter()
 
 class IdentifyRequest(BaseModel):
     image: str  # data URL：data:image/jpeg;base64,....
+    lang: str = "zh"  # 介面語言：zh／id／vi／th／en／ja
+
+
+LANG_NAMES = {"en": "English", "ja": "日本語", "id": "Bahasa Indonesia", "vi": "Tiếng Việt", "th": "ภาษาไทย"}
+
+TRANSLATE_PROMPT = """你是農業翻譯。把使用者給的 JSON 中所有中文字串翻譯成 {lang}，讀者是在台灣田間工作的外籍農業移工。
+規則：
+1. 保持完全相同的 JSON 結構與鍵名，陣列長度與順序不變，只回傳 JSON。
+2. 作物與病蟲害名稱：翻譯後在括號內保留中文原名，例如 "Anthracnose (炭疽病)"。
+3. 所有數字照抄，不可更改。
+4. 用詞簡單、口語，讓沒有農業專業背景的人也看得懂。"""
+
+
+async def _translate_result(result: dict, lang: str) -> dict:
+    """只翻譯顯示用文字；中文原名保留在原欄位，供確認後查詢合法用藥。失敗時維持中文。"""
+    payload = {
+        "crop": result.get("crop") or "",
+        "observation": result.get("observation") or "",
+        "tip": result.get("tip") or "",
+        "quality_tip": result.get("quality_tip") or "",
+        "care_tips": result.get("care_tips") or [],
+        "candidates": [{"name": c["name"], "reason": c.get("reason") or "", "check": c.get("check") or ""}
+                       for c in result.get("candidates") or []],
+    }
+    try:
+        from openai import AsyncOpenAI
+        client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+        resp = await client.chat.completions.create(
+            model="gpt-4o-mini", temperature=0, response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": TRANSLATE_PROMPT.format(lang=LANG_NAMES[lang])},
+                      {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+        )
+        tr = json.loads(resp.choices[0].message.content or "{}")
+    except Exception as e:
+        print(f"⚠️ 判讀結果翻譯失敗，維持中文：{e}")
+        return result
+
+    def pick(key):
+        v = tr.get(key)
+        return v if isinstance(v, str) and v.strip() else result.get(key)
+
+    result["crop_display"] = pick("crop") if result.get("crop") else ""
+    for key in ("observation", "tip", "quality_tip"):
+        if result.get(key):
+            result[key] = pick(key)
+    care = tr.get("care_tips")
+    if isinstance(care, list) and len(care) == len(result.get("care_tips") or []):
+        result["care_tips"] = [str(x) for x in care]
+    tcands = tr.get("candidates") if isinstance(tr.get("candidates"), list) else []
+    for i, c in enumerate(result.get("candidates") or []):
+        tc = tcands[i] if i < len(tcands) and isinstance(tcands[i], dict) else {}
+        c["name_display"] = tc.get("name") or c["name"]
+        c["reason"] = tc.get("reason") or c.get("reason", "")
+        c["check"] = tc.get("check") or c.get("check", "")
+    result["translated"] = True
+    result["lang"] = lang
+    return result
 
 
 VISION_PROMPT = """你是台灣的植物保護專家，專門協助農民判斷作物病蟲害。請觀察使用者上傳的照片並回傳 JSON。
@@ -244,4 +303,8 @@ async def identify(req: IdentifyRequest):
     except Exception as e:  # 紀錄失敗不影響使用者取得判讀結果
         print(f"⚠️ 判讀紀錄寫入失敗：{e}")
         result["diagnosis_id"] = None
+    # 稽核紀錄已用中文寫入；外語介面再翻譯顯示文字
+    lang = (req.lang or "zh").lower()
+    if lang in LANG_NAMES:
+        result = await _translate_result(result, lang)
     return result

@@ -253,6 +253,7 @@ class AskRequest(BaseModel):
     prev_pest: Optional[str] = None  # 上一輪對話鎖定的病蟲害，用於接續時延續同一病蟲害、數字一致
     is_followup: Optional[bool] = False  # 是否為「還有哪些」這類接續追問（前端偵測後標記）
     history: Optional[list] = None  # 最近幾輪對話 [{role: "user"|"bot", text: "..."}]，用於連續問答
+    lang: Optional[str] = "zh"  # 介面語言：zh／id／vi／th／en／ja
 
 
 # ── 連續問答：先判斷主題、把追問改寫成可獨立檢索的完整問題 ─────────────
@@ -867,8 +868,7 @@ SYSTEM_PROMPT = r"""你是「農藥博士」，角色就像農會裡經驗豐富
 【格式規則】回答一律使用純文字，不要使用 markdown 符號（如 **粗體**、### 標題、- 項目符號）或 LaTeX 數學符號（如 \[ \] 、\text{}）。條列項目請用「・」或直接換行呈現，計算步驟直接用文字說明（例如「總用水量 = 12分地 × 150L/分地 = 1800L」），不要用反斜線或特殊排版符號。"""
 
 
-@router.post("/api/ask", tags=["RAG 問答"], summary="農藥知識問答")
-async def ask(req: AskRequest):
+async def _ask_core(req: AskRequest):
     if not OPENAI_API_KEY:
         raise HTTPException(500, "OPENAI_API_KEY 未設定")
     if not os.path.exists(CHROMA_PATH):
@@ -983,6 +983,79 @@ async def ask(req: AskRequest):
                 "cards": cards, "compliance": compliance, "plan": plan if not is_refusal else None}
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ── 多語問答：問題先翻成中文檢索、回答以中文產生後再翻譯 ─────────────
+# 檢索、合法性檢查、拒答判斷與所有數字都在中文流程完成，翻譯只處理最後的說明文字。
+LANG_NAMES = {"en": "English", "ja": "日本語", "id": "Bahasa Indonesia", "vi": "Tiếng Việt", "th": "ภาษาไทย"}
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+TO_ZH_PROMPT = """你是農業翻譯。把使用者的問題翻譯成台灣繁體中文，交給農藥查詢系統檢索。
+作物、病蟲害、農藥請用台灣常用名稱（例如 cabbage／kubis／bắp cải／กะหล่ำปลี → 高麗菜，water spinach／kangkung／rau muống → 空心菜，mango → 芒果，anthracnose → 炭疽病，diamondback moth／ulat kubis／sâu tơ → 小菜蛾）。
+問題中已經寫成中文的名稱與地名原樣保留。只輸出翻譯後的問題，不要回答問題。"""
+
+ANSWER_PROMPT = """你是農業翻譯。把下面的繁體中文回答翻譯成 {lang}，讀者是在台灣田間工作的外籍農業移工與外籍人士。
+規則：
+1. 所有數字、單位、倍數、天數、日期、電話號碼完全照抄，不可更改、換算或省略。
+2. 農藥名稱：寫出國際通用名稱（英文普通名），後面括號保留中文原名，例如 trifloxystrobin（三氟敏）；不確定通用名稱時只寫中文原名，不要猜。
+3. 作物、病蟲害名稱翻譯後，括號內保留中文原名。
+4. 法規名稱與條號保留中文，括號內附翻譯。
+5. 句子簡單、口語，不要使用 markdown 符號。只輸出翻譯結果。"""
+
+
+LIST_PROMPT = """你是農業翻譯。使用者會給一個 JSON 字串陣列（繁體中文），請把每一個字串翻譯成 {lang}，讀者是外籍農業移工。數字、日期、天數完全照抄；農藥名稱保留中文原名。只回傳 JSON 陣列，元素數量與順序必須和輸入完全相同。"""
+
+
+def _mostly_chinese(text: str) -> bool:
+    t = re.sub(r"\s", "", text or "")
+    return bool(t) and len(_CJK_RE.findall(t)) / len(t) >= 0.5
+
+
+def _translate(system: str, text: str) -> str:
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import SystemMessage, HumanMessage
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, openai_api_key=OPENAI_API_KEY)
+    out = (llm.invoke([SystemMessage(content=system), HumanMessage(content=text)]).content or "").strip()
+    return out or text
+
+
+@router.post("/api/ask", tags=["RAG 問答"], summary="農藥知識問答（支援中、印、越、泰、英、日）")
+async def ask(req: AskRequest):
+    lang = (req.lang or "zh").lower()
+    if lang not in LANG_NAMES:
+        return await _ask_core(req)
+    try:
+        if not _mostly_chinese(req.question):
+            req.question = _translate(TO_ZH_PROMPT, req.question)
+    except Exception as e:
+        print(f"⚠️ 問題翻譯失敗，改用原文：{e}")
+    res = await _ask_core(req)
+    if res.get("answer"):
+        try:
+            res["answer"] = _translate(ANSWER_PROMPT.format(lang=LANG_NAMES[lang]), res["answer"])
+            res["translated"] = True
+        except Exception as e:
+            print(f"⚠️ 回答翻譯失敗，維持中文：{e}")
+    # 輪替用藥計畫：只翻譯說明句子與警告，日期與數字由前端或原樣顯示
+    plan = res.get("plan")
+    if isinstance(plan, dict):
+        steps = plan.get("steps") or []
+        texts = [str(s.get("reason") or "") for s in steps] + [str(w) for w in plan.get("warnings") or []]
+        if any(texts):
+            try:
+                out = _translate(LIST_PROMPT.format(lang=LANG_NAMES[lang]), json.dumps(texts, ensure_ascii=False))
+                arr = json.loads(re.search(r"\[[\s\S]*\]", out).group())
+                if isinstance(arr, list) and len(arr) == len(texts):
+                    for i, s in enumerate(steps):
+                        if s.get("reason"):
+                            s["reason"] = str(arr[i])
+                    if plan.get("warnings"):
+                        plan["warnings"] = [str(x) for x in arr[len(steps):]]
+            except Exception as e:
+                print(f"⚠️ 用藥計畫翻譯失敗，維持中文：{e}")
+    res["lang"] = lang
+    res["question_zh"] = req.question
+    return res
 
 
 # ── 農藥資料查詢 ──────────────────────────────────────────────
