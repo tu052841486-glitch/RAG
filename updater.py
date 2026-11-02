@@ -24,6 +24,8 @@ ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "")
 AUTO_UPDATE = os.environ.get("AUTO_UPDATE", "on").lower() != "off"
 TPE = timezone(timedelta(hours=8))
 MIN_RATIO = 0.8  # 新爬到的筆數低於現有 80% 視為異常，放棄更新
+RETRY_TIMES = 2      # 排程更新失敗（例如官網連線逾時）時的重試次數
+RETRY_WAIT = 1800    # 每次重試前等待秒數（30 分鐘）
 
 router = APIRouter(tags=["資料更新"])
 _lock = threading.Lock()
@@ -405,10 +407,21 @@ def start_scheduler():
             wait = _seconds_until_next_run()
             print(f"⏰ 下次資料自動更新：{(datetime.now(TPE) + timedelta(seconds=wait)).strftime('%Y-%m-%d %H:%M')}（台灣時間）")
             time.sleep(wait)
-            try:
-                run_update("all")
-            except Exception as e:
-                print(f"⚠️ 自動更新失敗：{e}")
+            source = "all"
+            for attempt in range(RETRY_TIMES + 1):
+                try:
+                    result = run_update(source) or {}
+                except Exception as e:
+                    print(f"⚠️ 自動更新失敗：{e}")
+                    result = {source: {"status": "failed"}}
+                failed = [k for k in ("pesticides", "regulations", "all")
+                          if isinstance(result.get(k), dict) and result[k].get("status") == "failed"]
+                if not failed or attempt == RETRY_TIMES:
+                    break
+                # 只重跑失敗的項目，避免成功的登記資料再爬一次（約 18 分鐘）
+                source = failed[0] if len(failed) == 1 else "all"
+                print(f"🔁 {'、'.join(failed)} 更新失敗，{RETRY_WAIT // 60} 分鐘後重試（第 {attempt + 1} 次）")
+                time.sleep(RETRY_WAIT)
             time.sleep(60)
 
     threading.Thread(target=_loop, daemon=True).start()
