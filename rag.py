@@ -467,6 +467,37 @@ TERM_ALIASES = {
     "無人機": "無人飛行載具",
 }
 
+# 病蟲害俗名 → 官方登記名稱候選（依序比對該作物實際登記的病蟲害，取第一個存在的）
+PEST_ALIASES = {
+    "紅蜘蛛": ["葉蟎類", "二點葉蟎", "神澤氏葉蟎", "葉蟎"],
+    "吊絲蟲": ["小菜蛾"],
+    "菜蟲": ["紋白蝶", "小菜蛾"],
+    "青蟲": ["紋白蝶", "小菜蛾"],
+    "夜盜蟲": ["斜紋夜蛾", "夜蛾類"],
+    "行軍蟲": ["秋行軍蟲"],
+    "白蝨": ["粉蝨類", "銀葉粉蝨"],
+    "白蚊仔": ["粉蝨類", "銀葉粉蝨"],
+    "蚜蟲": ["蚜蟲類"],
+    "薊馬": ["薊馬類"],
+    "介殼蟲": ["介殼蟲類"],
+    "果蠅": ["東方果實蠅", "果實蠅類", "瓜實蠅"],
+    "捲葉蟲": ["捲葉蛾類", "捲葉蛾"],
+    "飛蝨": ["褐飛蝨", "白背飛蝨", "斑飛蝨"],
+    "潛蠅": ["斑潛蠅類", "番茄斑潛蠅", "斑潛蠅"],
+    "線蟲": ["根瘤線蟲"],
+    "金龜子": ["金龜子類"],
+    "白粉": ["白粉病"],
+    "露菌": ["露菌病"],
+    "灰黴": ["灰黴病"],
+    "晚疫": ["晚疫病"],
+    "黑星": ["黑星病"],
+    "黑斑": ["黑斑病"],
+    "軟腐": ["細菌性軟腐病", "軟腐病"],
+    "萎凋": ["萎凋病"],
+    "稻熱": ["稻熱病"],
+    "紋枯": ["紋枯病"],
+}
+
 SOURCE_VERSIONS = {
     "pesticide": "2026年擷取",
     "law": "2026年擷取",
@@ -488,9 +519,62 @@ CALC_KEYWORDS = ['計算', '換算', 'ppm', '倍數', '公升', '毫升', '公�
                  '稀釋', '調配', '需要多少', '幾桶', '桶數']
 
 
+# ── 安全與友善用藥知識（內容取自官方與醫學中心資料，數字不經 AI 生成）──────
+SAFETY_TRIGGERS = ["中毒", "急救", "誤食", "誤喝", "喝到", "喝下", "吃到", "噴到", "濺到", "沾到",
+                   "頭暈", "噁心", "嘔吐", "催吐", "送醫", "吸入", "起疹"]
+HERBICIDE_WORDS = ["除草劑", "嘉磷塞", "年年春", "固殺草", "巴拉刈", "百草枯"]
+ORGANIC_TRIGGERS = ["有機", "友善", "不想用農藥", "不用農藥", "不想噴", "不噴農藥", "不要農藥", "天然",
+                    "自然農法", "家庭園藝", "陽台", "盆栽", "免登記", "資材", "明天要採收", "今天要採收",
+                    "後天要採收", "馬上要採收", "快採收", "快要採收"]
+
+
+def safety_context(q: str):
+    """中毒急救重點：固定內容、標示出處；AI 只負責以白話轉述，不可省略。"""
+    if not any(w in q for w in SAFETY_TRIGGERS):
+        return "", []
+    lines = [
+        "【農藥中毒急救重點（出處：臺北榮總農藥中毒照護衛教、林口長庚急診醫學科、環境事故專業諮詢中心防救手冊）】",
+        "• 懷疑農藥中毒時不可催吐，應儘速送醫，並把農藥包裝或空瓶一起帶到醫院，方便醫師判斷與治療。",
+        "• 皮膚沾到：立刻脫掉被污染的衣物與鞋子，用肥皂和大量流動清水沖洗皮膚至少 20 分鐘。",
+        "• 眼睛濺到：立即用流動清水持續沖洗至少 20 分鐘，再儘速就醫。",
+        "• 吸入或噴藥後頭暈不適：立刻離開噴藥現場，到空氣新鮮處休息；呼吸困難或症狀加重立即送醫。",
+        "• 意識不清：讓患者側躺（復甦姿勢），不可餵食、不可催吐；沒有呼吸心跳時立即施行 CPR 並撥打 119。",
+        "• 24 小時毒藥物諮詢：衛生福利部暨臺北榮總毒藥物防治諮詢中心 02-2871-7121。",
+    ]
+    if any(w in q for w in HERBICIDE_WORDS):
+        lines.append("• 除草劑也可能嚴重中毒：嘉磷塞（年年春）的毒性主要來自其中的介面活性劑；固殺草中毒會使血中氨升高；"
+                     "巴拉刈具腐蝕性，可能造成肺纖維化與多重器官衰竭。誤食時即使當下沒有症狀，也要帶著包裝立即就醫。")
+    sources = [
+        {"title": "臺北榮總｜農藥中毒之照護", "url": "https://ihealth.vghtpe.gov.tw/media/704", "date": "2026年擷取"},
+        {"title": "林口長庚｜台灣農藥中毒簡介及治療", "url": "https://www.cgmh.org.tw/cgmn/cgmn_file/2501010.pdf", "date": "2026年擷取"},
+    ]
+    return "\n".join(lines), sources
+
+
+def organic_context(q: str):
+    """友善與非化學防治資材指引：只提供類別與購買注意事項，不提供任何用量數字。"""
+    if not any(w in q for w in ORGANIC_TRIGGERS):
+        return "", []
+    lines = [
+        "【友善與非化學防治資材（出處：農業部農政視野、農業部常見問答、防檢署免登記植物保護資材規範）】",
+        "• 防檢署公告的「免登記植物保護資材」原料屬食品等級、安全性高；截至民國 109 年共公告 18 項，"
+        "其中用於病害防治的包括甲殼素、次氯酸鹽類、碳酸氫鈉、二氧化矽、碳酸鈣、中性化亞磷酸、矽酸鉀、柑桔精油、"
+        "醋類（竹醋液、木醋液、稻殼醋液）及食用植物油類。",
+        "• 碳酸氫鉀、窄域油、硫磺劑及亞磷酸等，屬於衛福部公告免訂殘留容許量的低毒性資材，可減少化學藥劑的使用次數。",
+        "• 免登記資材上市前須向防檢署完成產品登錄，購買時請確認產品已登錄，並依產品標示的方法與範圍使用。",
+        "• 生物農藥（例如蘇力菌）也是低毒性選項，但屬於登記農藥，必須依登記的作物與用法使用。",
+        "• 本系統沒有這些資材的用量資料：回答時不可提供或估算任何資材用量，請農友依產品標示使用，或洽當地農會、改良場。",
+    ]
+    sources = [
+        {"title": "農業部｜植保資材非化學合成 友善農耕環境", "url": "https://www.moa.gov.tw/ws.php?id=2511418", "date": "2026年擷取"},
+        {"title": "農業部｜不想使用農藥的其他防治措施", "url": "https://www.moa.gov.tw/faq_view.php?id=136", "date": "2026年擷取"},
+    ]
+    return "\n".join(lines), sources
+
+
 # 自建斷詞詞典：補上俗名對照與各類關鍵詞（須在第一次斷詞前註冊）
 tokenizer.add_terms(list(CROP_ALIASES) + list(CROP_ALIASES.values()) + list(PESTICIDE_ALIASES)
-                    + list(PESTICIDE_ALIASES.values()) + list(TERM_ALIASES.values()) + LAW_KEYWORDS + QA_KEYWORDS + RESIDUE_KEYWORDS)
+                    + list(PESTICIDE_ALIASES.values()) + list(TERM_ALIASES.values()) + list(PEST_ALIASES) + [c for v in PEST_ALIASES.values() for c in v] + LAW_KEYWORDS + QA_KEYWORDS + RESIDUE_KEYWORDS)
 
 
 def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, is_followup: bool = False) -> dict:
@@ -509,6 +593,10 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
     for alias, official in TERM_ALIASES.items():
         if alias in q_normalized and official not in q_normalized:
             q_normalized += f"（{official}）"
+    # 病蟲害俗名：附加最常見的官方名稱供語意與關鍵字檢索（精確比對另於下方依作物處理）
+    for alias, cands in PEST_ALIASES.items():
+        if alias in q_normalized and not any(c in q_normalized for c in cands):
+            q_normalized += f"（{cands[0]}）"
 
     def _crop_matches(crop_name, text):
         """判斷作物是否命中：完整名稱出現、或複合名稱（用空格分隔，如「檬果 芒果」）
@@ -577,6 +665,20 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
         ).fetchall()
         # 找出問句提到的病蟲害名稱（取最長的匹配，避免「炭疽」比「炭疽病」先中而抓到較短的）
         matched_pests = [p[0] for p in pest_rows if p[0] and p[0] in q_normalized]
+        # 俗名對照：從「該作物實際登記」的病蟲害中，依候選順序找第一個存在的名稱
+        if not matched_pests:
+            crop_pests = [p[0] for p in pest_rows if p[0]]
+            for alias, cands in PEST_ALIASES.items():
+                if alias not in q:
+                    continue
+                for c in cands:
+                    exact = [n for n in crop_pests if n == c]
+                    part = sorted([n for n in crop_pests if c in n], key=len)
+                    if exact or part:
+                        matched_pests = [(exact or part)[0]]
+                        break
+                if matched_pests:
+                    break
         matched_pest = max(matched_pests, key=len) if matched_pests else None
         # 接續追問（「還有哪些」）時，若這輪沒帶新病蟲害，沿用上一輪的病蟲害，讓數字與範圍一致
         if not matched_pest and followup_pest:
@@ -732,6 +834,12 @@ def retrieve_for_question(q: str, prev_crop: str = None, prev_pest: str = None, 
     context = sql_ctx
     if usage_ctx:
         context = usage_ctx + ("\n\n" + context if context else "")
+    # 安全與友善用藥知識：固定內容優先放在最前面
+    for _ctx_fn in (organic_context, safety_context):
+        _extra, _src = _ctx_fn(q)
+        if _extra:
+            context = _extra + ("\n\n" + context if context else "")
+            sources.extend(_src)
     if residue_sql_ctx:
         context += ("\n\n" + residue_sql_ctx) if context else residue_sql_ctx
     if law_sql_ctx:
@@ -829,6 +937,10 @@ SYSTEM_PROMPT = r"""你是「農藥博士」，角色就像農會裡經驗豐富
 【用藥合法性檢查】若知識庫開頭有「【用藥合法性檢查：未登記】」，第一句必須明確說「不可以」，並用一句話說明原因（這款藥沒有登記用在這個作物，用了可能違規，採收的作物也可能被驗出不合格），不得提供該藥用於該作物的任何用法；接著像指導員一樣，建議改用這個作物有登記的藥劑或洽詢當地農會、植物醫師，若知道農友想防治的病蟲害，可以直接點出替代藥劑。若是「【用藥合法性檢查：已登記】」，第一句先說可以用、有登記，再提醒稀釋倍數與安全採收期要照標示。
 
 【輪替用藥計畫】若知識庫開頭有「【輪替用藥計畫（演算法排程，數字不得更改）】」，代表系統已經用演算法排好噴藥時程，畫面上會顯示完整的計畫表（含日期、一桶水加多少藥）。這時文字回答**最多三句**，不要把計畫表的每個數字再列一遍：第一句講結論（用日期說，例如「今天先噴免速達，10/10 再換亞克瑞」），第二句說為什麼要換不同類的藥（避免抗藥性），第三句說哪一天起可以安全採收。不要提 IRAC、FRAC 這類代碼，改說「殺蟲第幾類」或「不同類的藥」。所有日期、藥名都必須照計畫內容，不可自行更改或增加。若計畫附有「提醒」，要一併轉達。若計畫標題已經寫明「距離採收 N 天」，代表農友已經講過採收日，絕對不要再反問採收天數；只有計畫沒有採收天數時，最後才問他。
+
+【中毒急救】若知識庫有「【農藥中毒急救重點】」，回答的前兩句必須先講立即要做的事（不可催吐、沖洗、帶包裝送醫），並附上毒藥物諮詢電話，不可省略、不可自行增加未列出的處置或藥物。
+
+【友善資材】若知識庫有「【友善與非化學防治資材】」，可以介紹資材類別與購買注意事項，但絕對不可以提供或估算任何資材的用量、稀釋倍數。
 
 【農藥販賣業者】若知識庫有「【合法農藥販賣業者查詢】」，用兩三句話告訴農友該地區有幾家登記農藥零售或批發的公司、可以看下方清單與地址，並一定要提醒「營業項目登記不等於持有農藥販賣業執照，購買前請確認店家有縣市政府核發的執照、產品有農藥許可證字號」。不要自行推薦或評價特定店家。
 
