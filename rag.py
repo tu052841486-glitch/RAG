@@ -307,6 +307,18 @@ DOMAIN_TERMS = ['農藥', '藥劑', '噴藥', '施藥', '用藥', '病蟲害', '
                 '殺蟲', '殺菌', '除草', '殺蟎', '安全採收期', '稀釋', '許可證', '農藥行', '販賣業', '殘留']
 
 
+# 規則把關：明確詢問「去哪裡買」的問句一律走販賣業者查詢（想「開」農藥行屬法規問題，排除）
+_DEALER_RE = re.compile(r"(哪裡|哪邊|去哪|在哪|何處).{0,6}(買|購買|有賣)|買得到|附近.{0,4}(農藥行|農藥店|販賣業者|資材行)"
+                        r"|(農藥行|農藥店|販賣業者|資材行)在哪")
+
+
+def _is_dealer_question(text: str) -> bool:
+    t = text or ""
+    if "開" in t and any(w in t for w in ("農藥行", "農藥店", "販賣業", "資材行")):
+        return False
+    return bool(_DEALER_RE.search(t))
+
+
 def _has_domain_term(text: str) -> bool:
     t = (text or "").replace("農藥博士", "")
     crops = list(CROP_ALIASES) + list(CROP_ALIASES.values())
@@ -1003,6 +1015,8 @@ async def _ask_core(req: AskRequest):
                     "crop": req.prev_crop, "pest": req.prev_pest, "cards": [], "compliance": []}
 
         # 1.5) 合法農藥販賣業者查詢（商工行政資料開放平臺）：不需要農藥知識檢索，直接查資料庫
+        if _is_dealer_question(original_q):
+            route["type"], route["intent"] = "on_topic", "dealer"
         if route.get("intent") == "dealer":
             counties, town = dealers.find_location(original_q + " " + route.get("question", ""))
             if not counties and not town:
