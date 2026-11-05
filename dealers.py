@@ -3,12 +3,16 @@
 資料來源（政府資料開放授權條款－第1版，免費）：
   - 營業項目代碼（F 零售、批發及餐飲業）查公司：找出營業項目登記「F207040 農藥零售業」「F107040 農藥批發業」的公司
   - 公司行號營業項目代碼表：取得營業項目代碼的正式名稱
+  - 財政部財政資訊中心「全國營業(稅籍)登記資料集」：補上獨資、合夥的「行號」
+    （鄉下的「○○農藥行」「○○農業資材行」多半是行號，不在公司登記裡），
+    以稅籍登記的行業名稱含「農藥」篩選。
 
-用途：回答農民「附近哪裡可以買農藥？」——依縣市、鄉鎮列出有登記農藥零售／批發的公司。
+用途：回答農民「附近哪裡可以買農藥？」——依縣市、鄉鎮列出有登記農藥零售／批發的公司與行號。
 注意：營業項目有登記農藥零售，不等於持有縣市政府核發的「農藥販賣業執照」，畫面與回答都會提醒購買前確認。
 
 資料每 7 天背景更新一次，存於 SQLite（pesticide_dealers），查詢時只讀資料庫。
 """
+import csv
 import re
 import time
 import threading
@@ -22,7 +26,8 @@ from db import get_db
 TPE = timezone(timedelta(hours=8))
 F_COMPANY_API = "https://data.gcis.nat.gov.tw/od/data/api/C8782705-DA48-4897-8537-9F7B0FC463EF"
 ITEM_CODE_API = "https://data.gcis.nat.gov.tw/od/data/api/FCB90AB1-E382-45CE-8D4F-394861851E28"
-SOURCE_NAME = "經濟部商業發展署商工行政資料開放平臺"
+TAX_CSV_URL = "https://eip.fia.gov.tw/data/BGMOPEN1.csv"   # 全國營業(稅籍)登記資料集（營業中）
+SOURCE_NAME = "經濟部商業發展署商工行政資料開放平臺、財政部財政資訊中心全國營業(稅籍)登記資料"
 ITEMS = {"F207040": "農藥零售業", "F107040": "農藥批發業"}   # 官方代碼表抓不到時的預設名稱
 REFRESH_DAYS = 7
 PAGE = 1000
@@ -102,12 +107,94 @@ def _fetch_code(code: str) -> list:
     return out
 
 
+def _tax_lines(resp):
+    """逐行解碼稅籍 CSV（自動判斷 UTF-8 或 Big5），不把整個檔案讀進記憶體。"""
+    it = resp.iter_lines()
+    first = next(it, b"")
+    try:
+        enc = "utf-8-sig"
+        first.decode(enc)
+    except UnicodeDecodeError:
+        enc = "cp950"
+    yield first.decode(enc, errors="replace")
+    for raw in it:
+        yield raw.decode(enc, errors="replace")
+
+
+def _item_from_industry(name: str) -> str:
+    if "零售" in name:
+        return "農藥零售業"
+    if "批發" in name:
+        return "農藥批發業"
+    return name.strip()
+
+
+def _fetch_tax() -> dict:
+    """從全國營業(稅籍)登記資料集找出行業名稱含「農藥」的營業人（含獨資、合夥行號）。"""
+    r = _session.get(TAX_CSV_URL, stream=True, timeout=(30, 600))
+    if r.status_code != 200:
+        raise RuntimeError(f"稅籍資料下載失敗 {r.status_code}")
+    reader = csv.reader(_tax_lines(r))
+    header = None
+    for row in reader:
+        if any("統一編號" in (c or "") for c in row):
+            header = [(c or "").strip() for c in row]
+            break
+    if not header:
+        raise RuntimeError("稅籍資料找不到欄位名稱")
+
+    def col(*keys, exclude=()):
+        for i, h in enumerate(header):
+            if all(k in h for k in keys) and not any(x in h for x in exclude):
+                return i
+        return None
+
+    i_ubn = col("統一編號", exclude=("總機構",))
+    i_name = col("營業人名稱")
+    i_addr = col("營業地址")
+    i_cap = col("資本額")
+    i_org = col("組織別")
+    ind = [i for i, h in enumerate(header) if h.startswith("名稱") or ("行業" in h and "名稱" in h)]
+    if i_ubn is None or i_name is None or i_addr is None or not ind:
+        raise RuntimeError(f"稅籍資料欄位不符：{header}")
+
+    out = {}
+    for row in reader:
+        if len(row) <= max(i_ubn, i_name, i_addr, *ind):
+            continue
+        hits = [row[i] for i in ind if "農藥" in (row[i] or "")]
+        if not hits:
+            continue
+        ubn = row[i_ubn].strip()
+        if not ubn:
+            continue
+        try:
+            cap = int(float(row[i_cap] or 0)) if i_cap is not None else 0
+        except ValueError:
+            cap = 0
+        out[ubn] = {
+            "name": row[i_name].strip(),
+            "address": _norm(row[i_addr]),
+            "capital": cap,
+            "org": (row[i_org].strip() if i_org is not None and len(row) > i_org else ""),
+            "items": {_item_from_industry(h) for h in hits},
+        }
+    print(f"🧾 稅籍資料：行業含「農藥」的營業人 {len(out)} 家")
+    return out
+
+
 def refresh() -> dict:
     init_table()
-    names = _item_names()
     merged = {}
-    for code in ITEMS:
-        for row in _fetch_code(code):
+    errors = []
+    try:
+        names = _item_names()
+        company_rows = [(code, row) for code in ITEMS for row in _fetch_code(code)]
+    except Exception as e:
+        errors.append(f"商工資料：{e}")
+        names, company_rows = dict(ITEMS), []
+    for code, row in company_rows:
+        if True:
             ubn = (row.get("Business_Accounting_NO") or "").strip()
             if not ubn:
                 continue
@@ -118,8 +205,19 @@ def refresh() -> dict:
                 "items": set(),
             })
             rec["items"].add(names.get(code, ITEMS[code]))
+    n_company = len(merged)
+    try:
+        for ubn, t in _fetch_tax().items():
+            if ubn in merged:
+                merged[ubn]["items"] |= t["items"]
+            else:
+                merged[ubn] = t
+    except Exception as e:
+        errors.append(f"稅籍資料：{e}")
+    for e in errors:
+        print(f"⚠️ 農藥販賣業者部分來源失敗：{e}")
     if not merged:
-        raise RuntimeError("沒有取得任何農藥販賣業者資料")
+        raise RuntimeError("沒有取得任何農藥販賣業者資料；" + "；".join(errors))
     now = datetime.now(TPE).strftime("%Y-%m-%d %H:%M")
     conn = get_db()
     with conn:
@@ -130,8 +228,8 @@ def refresh() -> dict:
               "、".join(sorted(r["items"])), now) for u, r in merged.items()],
         )
     conn.close()
-    print(f"🏪 農藥販賣業者更新完成：{len(merged)} 家")
-    return {"total": len(merged)}
+    print(f"🏪 農藥販賣業者更新完成：共 {len(merged)} 家（商工公司 {n_company} 家，其餘為稅籍行號）")
+    return {"total": len(merged), "company": n_company, "errors": errors}
 
 
 def start_background_refresh():
@@ -207,9 +305,9 @@ def query_dealers(county="", town: str = "", limit: int = 20) -> dict:
 def dealer_context(res: dict) -> str:
     area = (res.get("county") or "") + (res.get("town") or "")
     if not res.get("total"):
-        return (f"【合法農藥販賣業者查詢（{SOURCE_NAME}）】{area or '該地區'}查無登記農藥零售或批發的公司。"
+        return (f"【合法農藥販賣業者查詢（{SOURCE_NAME}）】{area or '該地區'}查無登記農藥零售或批發的公司或行號。"
                 "請建議農友改查鄰近鄉鎮，或洽詢當地農會。")
-    lines = [f"【合法農藥販賣業者查詢（{SOURCE_NAME}）】{area}共有 {res['total']} 家公司登記農藥零售或批發"
+    lines = [f"【合法農藥販賣業者查詢（{SOURCE_NAME}）】{area}共有 {res['total']} 家公司或行號登記農藥零售或批發"
              f"（其中零售 {res['retail']} 家），畫面會列出清單與地址。"]
     for d in res["dealers"][:5]:
         lines.append(f"・{d['name']}（{d['items']}）：{d['address']}")
@@ -218,7 +316,7 @@ def dealer_context(res: dict) -> str:
 
 
 # ── API ───────────────────────────────────────────────────────
-@router.get("/api/dealers", summary="依縣市鄉鎮查詢登記農藥零售／批發的公司")
+@router.get("/api/dealers", summary="依縣市鄉鎮查詢登記農藥零售／批發的公司與行號")
 def dealers_api(county: str = Query(""), town: str = Query(""), limit: int = Query(30, le=200)):
     return query_dealers(county, town, limit)
 
